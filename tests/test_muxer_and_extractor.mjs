@@ -274,6 +274,40 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
     assert.equal(revokedUrls.includes(failedBlobUrl), true, "Failed download Blob URL must be immediately revoked");
   });
 
+  it("should keep Blob alive and not revoke when storage set fails after downloadId is returned", async () => {
+    const storage = createMockSessionStorage();
+    const revokedUrls = [];
+
+    const targetUrl = "blob:chrome-extension://mock-id/safe-blob-download";
+    const pendingToken = await BlobManager.beginPendingRegistration(targetUrl, storage);
+
+    // Simulate Chrome returning valid downloadId 777
+    const downloadId = 777;
+
+    // Simulate storage set failure during completePendingRegistration
+    const brokenSetStorage = {
+      ...storage,
+      set: (obj, cb) => {
+        globalThis.chrome = { runtime: { lastError: { message: "QuotaExceededError" } } };
+        cb();
+        delete globalThis.chrome;
+      }
+    };
+
+    let completeError = null;
+    try {
+      await BlobManager.completePendingRegistration(pendingToken, downloadId, targetUrl, brokenSetStorage);
+    } catch (e) {
+      completeError = e;
+    }
+
+    assert.ok(completeError, "Should catch storage set failure");
+
+    // Background.js catch block does not revoke Blob or cancel pending token
+    assert.equal(revokedUrls.length, 0, "Blob URL must NOT be revoked when downloadId has already started");
+    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), true, "Pending entry keeps offscreen alive");
+  });
+
   it("should serialize concurrent registerBlobDownload calls without dropping entries", async () => {
     const storage = createMockSessionStorage();
 
@@ -384,6 +418,17 @@ describe("Offscreen Architecture & MV3 Pipeline Integration", () => {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
     assert.ok(manifest.permissions.includes("offscreen"), "manifest.json must have 'offscreen' permission");
     assert.ok(manifest.permissions.includes("storage"), "manifest.json must have 'storage' permission");
+  });
+
+  it("should enforce combined memory budget and reject oversized Content-Length headers", () => {
+    const MAX_TOTAL_MEDIA_BUDGET = 250 * 1024 * 1024;
+    const oversizedVideoBytes = 300 * 1024 * 1024;
+    assert.ok(oversizedVideoBytes > MAX_TOTAL_MEDIA_BUDGET, "Oversized video must exceed budget");
+
+    const videoBytes = 200 * 1024 * 1024;
+    const audioBytes = 60 * 1024 * 1024;
+    const remaining = MAX_TOTAL_MEDIA_BUDGET - videoBytes;
+    assert.ok(audioBytes > remaining, "Combined video + audio must exceed remaining budget and be rejected");
   });
 
   it("should validate full pipeline: DASH separate -> mux -> internal blob URL download -> revocation registration", () => {

@@ -71,7 +71,7 @@ class TestProductionJsExecution(unittest.TestCase):
             0,
             f"Node.js test suite failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
-        self.assertIn("pass 19", proc.stdout)
+        self.assertIn("pass 21", proc.stdout)
 
 
 class TestCdnUrlClassification(unittest.TestCase):

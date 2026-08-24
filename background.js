@@ -979,11 +979,9 @@ async function downloadMedia({ url, isInternalBlob = false, type = "video", titl
             try {
               await BlobManager.completePendingRegistration(pendingToken, downloadId, targetUrl);
             } catch (storageErr) {
-              console.warn("[Bin.Late FB Downloader] Failed to complete blob registration; revoking:", storageErr.message);
-              await BlobManager.cancelPendingRegistration(pendingToken);
-              await BlobManager.revokeBlobUrl(targetUrl);
-              reject(storageErr);
-              return;
+              console.warn("[Bin.Late FB Downloader] Failed to persist active registration; keeping blob alive:", storageErr.message);
+              // Do NOT cancel or revoke the Blob URL because Chrome has already started downloading downloadId!
+              // The pending token remains in session storage as an active resource, keeping offscreen open safely.
             }
           }
           resolve(downloadId);
