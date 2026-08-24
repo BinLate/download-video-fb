@@ -3,7 +3,7 @@
  * Directly exercises production JS modules: lib/extractor.js, lib/mp4muxer.js, lib/blob_manager.js, and offscreen architecture.
  */
 
-import { describe, it } from "node:test";
+import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -258,6 +258,23 @@ describe("Stream Budget & Memory Protection (fetchWithBudget)", () => {
       /không hỗ trợ ReadableStream/
     );
   });
+
+  it("should reject Content-Length with malformed or non-integer values", async () => {
+    const mockMalformed = async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map([["content-length", "100MB"]]),
+      body: null,
+      arrayBuffer: async () => new Uint8Array(10).buffer
+    });
+
+    await assert.rejects(
+      async () => {
+        await FbExtractor.fetchWithBudget("https://video.fbcdn.net/test.mp4", 100, mockMalformed);
+      },
+      /không hỗ trợ ReadableStream/
+    );
+  });
 });
 
 describe("Mp4Muxer (lib/mp4muxer.js)", () => {
@@ -341,6 +358,10 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
     };
   }
 
+  beforeEach(() => {
+    BlobManager.clearMemoryFallback();
+  });
+
   it("should persist Blob URL metadata across simulated service-worker restarts and clean up upon completion", async () => {
     const storage = createMockSessionStorage();
     const revokedUrls = [];
@@ -393,11 +414,19 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
     assert.equal(revokedUrls.includes(failedBlobUrl), true, "Failed download Blob URL must be immediately revoked");
   });
 
-  it("should record downloadId on pending entry and clean up fully on downloads.onChanged when completePendingRegistration fails", async () => {
-    const storage = createMockSessionStorage();
+  it("should recover and clean up completely via in-memory fallback when BOTH storage writes fail", async () => {
+    // Storage where set() ALWAYS fails
+    const brokenSetStorage = {
+      get: (key, cb) => cb({ [key]: { active: {}, pending: {} } }),
+      set: (obj, cb) => {
+        globalThis.chrome = { runtime: { lastError: { message: "QuotaExceededError" } } };
+        cb();
+        delete globalThis.chrome;
+      }
+    };
+
     const revokedUrls = [];
     let offscreenClosed = false;
-
     const mockSender = async (msg) => {
       if (msg.action === "OFFSCREEN_REVOKE_URL") revokedUrls.push(msg.blobUrl);
     };
@@ -405,29 +434,34 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
       offscreenClosed = true;
     };
 
-    const targetUrl = "blob:chrome-extension://mock-id/safe-blob-download";
-    const pendingToken = await BlobManager.beginPendingRegistration(targetUrl, storage);
-    const downloadId = 888;
+    const targetUrl = "blob:chrome-extension://mock-id/dual-failure-blob";
+    const pendingToken = await BlobManager.beginPendingRegistration(targetUrl, brokenSetStorage);
+    assert.ok(pendingToken);
 
-    // Simulate completePendingRegistration storage failure
-    await BlobManager.recordPendingDownloadId(pendingToken, downloadId, storage);
+    // Verify in-memory fallback holds the item
+    assert.equal(await BlobManager.hasActiveBlobDownloads(brokenSetStorage), true);
 
-    // Verify pending entry has downloadId recorded and offscreen stays open
-    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), true);
+    // Simulate completePendingRegistration failure -> recordPendingDownloadId failure
+    const downloadId = 999;
+    await assert.rejects(async () => {
+      await BlobManager.completePendingRegistration(pendingToken, downloadId, targetUrl, brokenSetStorage);
+    }, /QuotaExceededError/);
 
-    // Later, chrome.downloads.onChanged fires with downloadId 888
-    const unregisteredUrl = await BlobManager.unregisterBlobDownload(downloadId, storage);
-    assert.equal(unregisteredUrl, targetUrl, "Must reconcile downloadId from pending entry");
+    await BlobManager.recordPendingDownloadId(pendingToken, downloadId, brokenSetStorage);
 
-    // Revoke Blob URL
-    await BlobManager.revokeBlobUrl(unregisteredUrl, {
+    // Download completes -> unregisterBlobDownload consults in-memory fallback
+    const recoveredUrl = await BlobManager.unregisterBlobDownload(downloadId, brokenSetStorage);
+    assert.equal(recoveredUrl, targetUrl, "Must recover Blob URL from in-memory fallback");
+
+    // Revoke URL and close offscreen
+    await BlobManager.revokeBlobUrl(recoveredUrl, {
       messageSender: mockSender,
       offscreenCloser: mockCloser,
-      storageApi: storage
+      storageApi: brokenSetStorage
     });
 
-    assert.equal(revokedUrls.includes(targetUrl), true, "Blob URL must be revoked on completion");
-    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), false, "All pending and active records must be cleared");
+    assert.equal(revokedUrls.includes(targetUrl), true, "Blob URL must be revoked");
+    assert.equal(await BlobManager.hasActiveBlobDownloads(brokenSetStorage), false, "All in-memory entries must be cleared");
     assert.equal(offscreenClosed, true, "Offscreen document must close cleanly");
   });
 
@@ -537,6 +571,10 @@ describe("Offscreen Architecture & MV3 Pipeline Integration", () => {
 
     assert.ok(fs.existsSync(htmlPath), "offscreen.html must exist");
     assert.ok(fs.existsSync(jsPath), "offscreen.js must exist");
+
+    const htmlContent = fs.readFileSync(htmlPath, "utf-8");
+    assert.ok(htmlContent.includes("../lib/extractor.js"), "offscreen.html must load lib/extractor.js");
+    assert.ok(htmlContent.includes("../lib/mp4muxer.js"), "offscreen.html must load lib/mp4muxer.js");
 
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
     assert.ok(manifest.permissions.includes("offscreen"), "manifest.json must have 'offscreen' permission");
