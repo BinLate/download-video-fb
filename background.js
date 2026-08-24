@@ -956,7 +956,16 @@ async function downloadMedia({ url, isInternalBlob = false, type = "video", titl
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const filename = `BinLate_FB_${type.toUpperCase()}_${quality}_${cleanTitle}_${timestamp}.mp4`;
 
-  const pendingToken = isBlob ? await BlobManager.beginPendingRegistration(targetUrl) : null;
+  let pendingToken = null;
+  if (isBlob) {
+    try {
+      pendingToken = await BlobManager.beginPendingRegistration(targetUrl);
+    } catch (regErr) {
+      console.error("[Bin.Late FB Downloader] Failed to register pending blob download:", regErr);
+      await BlobManager.revokeBlobUrl(targetUrl);
+      throw new Error("Không thể khởi tạo lưu trữ phiên tải cho luồng video/âm thanh đã ghép: " + regErr.message);
+    }
+  }
 
   return new Promise((resolve, reject) => {
     chrome.downloads.download(

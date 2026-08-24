@@ -414,17 +414,61 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
     assert.equal(revokedUrls.includes(failedBlobUrl), true, "Failed download Blob URL must be immediately revoked");
   });
 
-  it("should recover and clean up completely via in-memory fallback when BOTH storage writes fail", async () => {
-    // Storage where set() ALWAYS fails
+  it("should fail fast and reject beginPendingRegistration when storage set fails", async () => {
+    const brokenSetStorage = createMockSessionStorage({ setError: "QuotaExceededError" });
+    await assert.rejects(
+      async () => {
+        await BlobManager.beginPendingRegistration("blob:test/fail-fast", brokenSetStorage);
+      },
+      /QuotaExceededError/
+    );
+  });
+
+  it("should recover and clean up completely across SW restart when pending->active storage set fails", async () => {
+    const storage = createMockSessionStorage();
+    const targetUrl = "blob:chrome-extension://mock-id/restart-recovery-blob";
+
+    // 1. Initial beginPendingRegistration succeeds in durable storage
+    const token = await BlobManager.beginPendingRegistration(targetUrl, storage);
+    assert.ok(token);
+    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), true);
+
+    const downloadId = 777;
+
+    // 2. completePendingRegistration fails (storage write error during transition)
     const brokenSetStorage = {
-      get: (key, cb) => cb({ [key]: { active: {}, pending: {} } }),
+      get: storage.get,
       set: (obj, cb) => {
-        globalThis.chrome = { runtime: { lastError: { message: "QuotaExceededError" } } };
+        globalThis.chrome = { runtime: { lastError: { message: "Simulated transition write failure" } } };
         cb();
         delete globalThis.chrome;
+      },
+      dump: storage.dump
+    };
+
+    await assert.rejects(async () => {
+      await BlobManager.completePendingRegistration(token, downloadId, targetUrl, brokenSetStorage);
+    }, /Simulated transition write failure/);
+
+    // 3. Simulate SW worker restart: memory fallback map is completely cleared
+    BlobManager.clearMemoryFallback();
+
+    // 4. Mock chrome.downloads API reflecting the active download ID and target Blob URL
+    const mockDownloadsApi = {
+      search: ({ id }, cb) => {
+        if (id === downloadId) {
+          cb([{ id: downloadId, url: targetUrl, state: "complete" }]);
+        } else {
+          cb([]);
+        }
       }
     };
 
+    // 5. downloads.onChanged fires on restarted worker
+    const unregisterUrl = await BlobManager.unregisterBlobDownload(downloadId, storage, mockDownloadsApi);
+    assert.equal(unregisterUrl, targetUrl, "Must correlate pending record via chrome.downloads.search");
+
+    // 6. Revoke URL
     const revokedUrls = [];
     let offscreenClosed = false;
     const mockSender = async (msg) => {
@@ -434,34 +478,14 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
       offscreenClosed = true;
     };
 
-    const targetUrl = "blob:chrome-extension://mock-id/dual-failure-blob";
-    const pendingToken = await BlobManager.beginPendingRegistration(targetUrl, brokenSetStorage);
-    assert.ok(pendingToken);
-
-    // Verify in-memory fallback holds the item
-    assert.equal(await BlobManager.hasActiveBlobDownloads(brokenSetStorage), true);
-
-    // Simulate completePendingRegistration failure -> recordPendingDownloadId failure
-    const downloadId = 999;
-    await assert.rejects(async () => {
-      await BlobManager.completePendingRegistration(pendingToken, downloadId, targetUrl, brokenSetStorage);
-    }, /QuotaExceededError/);
-
-    await BlobManager.recordPendingDownloadId(pendingToken, downloadId, brokenSetStorage);
-
-    // Download completes -> unregisterBlobDownload consults in-memory fallback
-    const recoveredUrl = await BlobManager.unregisterBlobDownload(downloadId, brokenSetStorage);
-    assert.equal(recoveredUrl, targetUrl, "Must recover Blob URL from in-memory fallback");
-
-    // Revoke URL and close offscreen
-    await BlobManager.revokeBlobUrl(recoveredUrl, {
+    await BlobManager.revokeBlobUrl(unregisterUrl, {
       messageSender: mockSender,
       offscreenCloser: mockCloser,
-      storageApi: brokenSetStorage
+      storageApi: storage
     });
 
     assert.equal(revokedUrls.includes(targetUrl), true, "Blob URL must be revoked");
-    assert.equal(await BlobManager.hasActiveBlobDownloads(brokenSetStorage), false, "All in-memory entries must be cleared");
+    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), false, "All records must be cleared");
     assert.equal(offscreenClosed, true, "Offscreen document must close cleanly");
   });
 
