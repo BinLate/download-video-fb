@@ -3,7 +3,7 @@
  * Author: Bin.Late
  */
 
-importScripts("lib/extractor.js", "lib/mp4muxer.js");
+importScripts("lib/extractor.js", "lib/mp4muxer.js", "lib/blob_manager.js");
 
 const tabVideosMap = new Map();
 // tabId -> { sessionId, armedAt, list: [{url, videoTyped, ts, session}] }
@@ -736,15 +736,12 @@ async function ensureOffscreenDocument() {
   }
 }
 
-// Track active blob URLs for revocation on completion
-const activeBlobDownloads = new Map(); // downloadId -> blobUrl
-
-chrome.downloads.onChanged.addListener((delta) => {
+// Track and revoke active Blob URLs across MV3 lifecycle events
+chrome.downloads.onChanged.addListener(async (delta) => {
   if (delta.state && (delta.state.current === "complete" || delta.state.current === "interrupted")) {
-    const blobUrl = activeBlobDownloads.get(delta.id);
+    const blobUrl = await BlobManager.unregisterBlobDownload(delta.id);
     if (blobUrl) {
-      activeBlobDownloads.delete(delta.id);
-      chrome.runtime.sendMessage({ action: "OFFSCREEN_REVOKE_URL", blobUrl }).catch(() => {});
+      await BlobManager.revokeBlobUrl(blobUrl);
     }
   }
 });
@@ -964,12 +961,16 @@ async function downloadMedia({ url, isInternalBlob = false, type = "video", titl
         saveAs: false,
         conflictAction: "uniquify"
       },
-      (downloadId) => {
+      async (downloadId) => {
         if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
+          const err = new Error(chrome.runtime.lastError.message);
+          if (isBlob) {
+            await BlobManager.revokeBlobUrl(targetUrl);
+          }
+          reject(err);
         } else {
           if (isBlob) {
-            activeBlobDownloads.set(downloadId, targetUrl);
+            await BlobManager.registerBlobDownload(downloadId, targetUrl);
           }
           resolve(downloadId);
         }

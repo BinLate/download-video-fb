@@ -1,6 +1,6 @@
 /**
  * Node.js Unit & Integration Test Suite
- * Directly exercises production JS modules: lib/extractor.js, lib/mp4muxer.js, and offscreen architecture.
+ * Directly exercises production JS modules: lib/extractor.js, lib/mp4muxer.js, lib/blob_manager.js, and offscreen architecture.
  */
 
 import { describe, it } from "node:test";
@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import FbExtractor from "../lib/extractor.js";
 import Mp4Muxer from "../lib/mp4muxer.js";
+import BlobManager from "../lib/blob_manager.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -159,6 +160,73 @@ describe("Mp4Muxer (lib/mp4muxer.js)", () => {
   });
 });
 
+describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
+  function createMockSessionStorage() {
+    let memory = {};
+    return {
+      get: (key, cb) => cb({ [key]: { ...memory[key] } }),
+      set: (obj, cb) => {
+        memory = { ...memory, ...obj };
+        if (cb) cb();
+      },
+      dump: () => memory
+    };
+  }
+
+  it("should persist Blob URL metadata across simulated service-worker restarts and clean up upon completion", async () => {
+    const storage = createMockSessionStorage();
+    const revokedUrls = [];
+    let offscreenClosed = false;
+
+    const mockSender = async (msg) => {
+      if (msg.action === "OFFSCREEN_REVOKE_URL") revokedUrls.push(msg.blobUrl);
+    };
+    const mockCloser = async () => {
+      offscreenClosed = true;
+    };
+
+    // 1. Register blob download
+    const blobUrl = "blob:chrome-extension://mock-id/fb-reel-123";
+    await BlobManager.registerBlobDownload(101, blobUrl, storage);
+    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), true);
+
+    // 2. Simulate Service Worker restart (in-memory variables lost, storage persists)
+    // Worker wakes up when download 101 finishes
+    const retrievedUrl = await BlobManager.unregisterBlobDownload(101, storage);
+    assert.equal(retrievedUrl, blobUrl, "Must retrieve Blob URL from session storage after restart");
+
+    // 3. Revoke Blob URL and close offscreen document
+    await BlobManager.revokeBlobUrl(retrievedUrl, {
+      messageSender: mockSender,
+      offscreenCloser: mockCloser,
+      storageApi: storage
+    });
+
+    assert.equal(revokedUrls.includes(blobUrl), true, "Blob URL must be revoked");
+    assert.equal(offscreenClosed, true, "Offscreen document must close when no downloads remain");
+    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), false);
+  });
+
+  it("should immediately revoke Blob URL if chrome.downloads.download fails to start", async () => {
+    const storage = createMockSessionStorage();
+    const revokedUrls = [];
+
+    const mockSender = async (msg) => {
+      if (msg.action === "OFFSCREEN_REVOKE_URL") revokedUrls.push(msg.blobUrl);
+    };
+
+    const failedBlobUrl = "blob:chrome-extension://mock-id/failed-download";
+
+    // Simulate download launch error
+    await BlobManager.revokeBlobUrl(failedBlobUrl, {
+      messageSender: mockSender,
+      storageApi: storage
+    });
+
+    assert.equal(revokedUrls.includes(failedBlobUrl), true, "Failed download Blob URL must be immediately revoked");
+  });
+});
+
 describe("Offscreen Architecture & MV3 Pipeline Integration", () => {
   it("should have valid offscreen document files and manifest permissions", () => {
     const htmlPath = path.join(rootDir, "offscreen", "offscreen.html");
@@ -170,6 +238,7 @@ describe("Offscreen Architecture & MV3 Pipeline Integration", () => {
 
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
     assert.ok(manifest.permissions.includes("offscreen"), "manifest.json must have 'offscreen' permission");
+    assert.ok(manifest.permissions.includes("storage"), "manifest.json must have 'storage' permission");
   });
 
   it("should validate full pipeline: DASH separate -> mux -> internal blob URL download -> revocation registration", () => {
