@@ -183,7 +183,8 @@
   }
 
   /**
-   * Extract video ID from URL or DOM element
+   * Extract authoritative Facebook video or reel ID from URL or DOM element.
+   * Returns null if no genuine Facebook identifier is found (never returns synthetic IDs).
    */
   function extractVideoId(url, element) {
     // Priority 1: Direct URL patterns
@@ -197,32 +198,33 @@
       const videoMatch = url.match(/\/videos\/(?:[^/]+\/)?(\d+)/);
       if (videoMatch) return videoMatch[1];
     }
-    
-    // Priority 2: Element's own data attributes (most accurate for Reels)
+
+    // Priority 2: Element's own authoritative data attributes
     if (element) {
-      // Check video element directly for data attributes
-      const videoReelId = element.getAttribute("data-reel-id") || element.getAttribute("data-video-id");
-      if (videoReelId) return videoReelId;
-      
-      // Check parent containers
+      const rawReelId = element.getAttribute("data-reel-id");
+      if (rawReelId && !rawReelId.startsWith("vid_")) return rawReelId;
+
+      const rawVideoId = element.getAttribute("data-video-id");
+      if (rawVideoId && !rawVideoId.startsWith("vid_")) return rawVideoId;
+
+      // Priority 3: Check parent containers for Facebook metadata
       const postContainer = element.closest('[data-video-id], [data-reel-id], [data-store*="video_id"]');
       if (postContainer) {
         const directId = postContainer.getAttribute("data-video-id") || postContainer.getAttribute("data-reel-id");
-        if (directId) return directId;
+        if (directId && !directId.startsWith("vid_")) return directId;
         const dataStore = postContainer.getAttribute("data-store");
         const match = dataStore?.match(/"(?:video_id|reel_id)":\s*"?(\d+)"?/);
         if (match) return match[1];
       }
     }
-    
-    // Priority 3: URL pathname (current page)
+
+    // Priority 4: URL pathname (current page)
     const pathReel = window.location.pathname.match(/\/(?:reel|reels|share\/r)\/([a-zA-Z0-9_-]+)/i);
     if (pathReel) return pathReel[1];
     const pathVideo = window.location.pathname.match(/\/videos\/(\d+)/);
     if (pathVideo) return pathVideo[1];
 
-    // Priority 4: Fallback to element ID or generated ID
-    return element?.id || `vid_${Math.random().toString(36).substr(2, 9)}`;
+    return null;
   }
 
   /**
@@ -256,20 +258,30 @@
 
     const isReel = isReelContext(video);
     const videoType = isReel ? "reel" : "video";
-    const videoId = extractVideoId(postLink, video) || video.id || `vid_${Math.random().toString(36).substr(2, 9)}`;
-    
-    // Set data-reel-id on video element for later correlation
-    video.setAttribute("data-reel-id", videoId);
+    const videoId = extractVideoId(postLink, video);
+
+    // Only write data-reel-id if we have an authoritative Facebook identifier
+    if (videoId) {
+      video.setAttribute("data-reel-id", videoId);
+    }
+
+    // Use a persistent instance ID strictly for DOM tracking in detectedVideos map
+    let instanceId = video.getAttribute("data-binlate-instance-id");
+    if (!instanceId) {
+      instanceId = video.id || `vid_${Math.random().toString(36).substr(2, 9)}`;
+      video.setAttribute("data-binlate-instance-id", instanceId);
+    }
 
     return {
       element: video,
+      instanceId: instanceId,
+      id: instanceId,
       videoId: videoId,
       url: src,
       isBlob: !src || src.startsWith("blob:"),
       postLink: postLink || window.location.href,
       type: videoType,
-      title: title,
-      id: videoId
+      title: title
     };
   }
 
@@ -372,9 +384,12 @@
     let isDashSeparate = false;
     const scriptUrls = extractUrlsFromScripts();
 
+    // Dynamically re-evaluate authoritative Facebook videoId at download time
+    const authoritativeVideoId = videoInfo.videoId || (videoInfo.element ? extractVideoId(videoInfo.postLink, videoInfo.element) : null);
+
     let streamMatch = null;
-    if (videoInfo.videoId && scriptUrls.has(videoInfo.videoId)) {
-      streamMatch = scriptUrls.get(videoInfo.videoId);
+    if (authoritativeVideoId && scriptUrls.has(authoritativeVideoId)) {
+      streamMatch = scriptUrls.get(authoritativeVideoId);
     }
     // REMOVED: fallback_any - it caused cross-Reel contamination
     // Only exact videoId match is allowed

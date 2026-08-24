@@ -660,3 +660,115 @@ describe("Offscreen Architecture & MV3 Pipeline Integration", () => {
     assert.equal(activeBlobDownloads.has(42), false);
   });
 });
+
+describe("Content Script Video ID Correlation Lifecycle (Regression [B001])", () => {
+  it("should separate synthetic instance IDs from Facebook IDs and adopt real ID upon rescan", () => {
+    // Simulated DOM Video Element
+    class MockElement {
+      constructor() {
+        this.attributes = new Map();
+        this.parentElement = null;
+        this.src = "blob:https://facebook.com/fake-stream";
+      }
+      getAttribute(name) {
+        return this.attributes.get(name) || null;
+      }
+      setAttribute(name, val) {
+        this.attributes.set(name, String(val));
+      }
+      closest(selector) {
+        return this.parentElement;
+      }
+    }
+
+    class MockParent {
+      constructor() {
+        this.attributes = new Map();
+      }
+      getAttribute(name) {
+        return this.attributes.get(name) || null;
+      }
+      setAttribute(name, val) {
+        this.attributes.set(name, String(val));
+      }
+    }
+
+    function extractVideoId(url, element) {
+      if (url) {
+        const reelMatch = url.match(/\/(?:reel|reels|share\/r)\/([a-zA-Z0-9_-]+)/i);
+        if (reelMatch) return reelMatch[1];
+        const watchMatch = url.match(/[?&]v=(\d+)/);
+        if (watchMatch) return watchMatch[1];
+        const videoMatch = url.match(/\/videos\/(?:[^/]+\/)?(\d+)/);
+        if (videoMatch) return videoMatch[1];
+      }
+
+      if (element) {
+        const rawReelId = element.getAttribute("data-reel-id");
+        if (rawReelId && !rawReelId.startsWith("vid_")) return rawReelId;
+
+        const rawVideoId = element.getAttribute("data-video-id");
+        if (rawVideoId && !rawVideoId.startsWith("vid_")) return rawVideoId;
+
+        const postContainer = element.closest('[data-video-id], [data-reel-id], [data-store*="video_id"]');
+        if (postContainer) {
+          const directId = postContainer.getAttribute("data-video-id") || postContainer.getAttribute("data-reel-id");
+          if (directId && !directId.startsWith("vid_")) return directId;
+          const dataStore = postContainer.getAttribute("data-store");
+          const match = dataStore?.match(/"(?:video_id|reel_id)":\s*"?(\d+)"?/);
+          if (match) return match[1];
+        }
+      }
+      return null;
+    }
+
+    function parseVideoElement(video, postLink = "") {
+      const videoId = extractVideoId(postLink, video);
+      if (videoId) {
+        video.setAttribute("data-reel-id", videoId);
+      }
+      let instanceId = video.getAttribute("data-binlate-instance-id");
+      if (!instanceId) {
+        instanceId = `vid_${Math.random().toString(36).substr(2, 9)}`;
+        video.setAttribute("data-binlate-instance-id", instanceId);
+      }
+      return {
+        element: video,
+        instanceId: instanceId,
+        id: instanceId,
+        videoId: videoId
+      };
+    }
+
+    const scriptUrls = new Map([
+      ["10987654321", { hdUrl: "https://video.fbcdn.net/10987654321_hd.mp4", sdUrl: "https://video.fbcdn.net/10987654321_sd.mp4" }]
+    ]);
+
+    const videoEl = new MockElement();
+
+    // First scan: video is newly attached to DOM, Facebook attributes not yet rendered
+    const firstPass = parseVideoElement(videoEl);
+    assert.equal(firstPass.videoId, null, "First scan has no Facebook ID");
+    assert.ok(firstPass.instanceId.startsWith("vid_"), "Instance ID is generated for tracking");
+    assert.equal(videoEl.getAttribute("data-reel-id"), null, "Synthetic ID must NOT be written to data-reel-id");
+
+    // Exact script lookup fails cleanly without matching wrong streams
+    assert.equal(scriptUrls.has(firstPass.videoId), false);
+
+    // Dynamic update: Facebook renders post container with data-video-id
+    const parentContainer = new MockParent();
+    parentContainer.setAttribute("data-video-id", "10987654321");
+    videoEl.parentElement = parentContainer;
+
+    // Second scan (Rescan / On-demand): Element adopts real Facebook ID
+    const secondPass = parseVideoElement(videoEl);
+    assert.equal(secondPass.videoId, "10987654321", "Second scan adopts genuine Facebook ID");
+    assert.equal(secondPass.instanceId, firstPass.instanceId, "Instance ID remains stable across rescans");
+    assert.equal(videoEl.getAttribute("data-reel-id"), "10987654321", "Authoritative ID is now stored in data-reel-id");
+
+    // Exact lookup succeeds on the second scan
+    assert.equal(scriptUrls.has(secondPass.videoId), true);
+    assert.equal(scriptUrls.get(secondPass.videoId).hdUrl, "https://video.fbcdn.net/10987654321_hd.mp4");
+  });
+});
+
