@@ -184,46 +184,35 @@
 
   /**
    * Extract authoritative Facebook video or reel ID from URL or DOM element.
-   * Returns null if no genuine Facebook identifier is found (never returns synthetic IDs).
+   * Leverages FbExtractor.extractCanonicalVideoId to ensure strict canonical numeric ID filtering.
    */
   function extractVideoId(url, element) {
-    // Priority 1: Direct URL patterns
+    if (typeof FbExtractor !== "undefined" && typeof FbExtractor.extractCanonicalVideoId === "function") {
+      return FbExtractor.extractCanonicalVideoId(url, element, window.location.pathname);
+    }
+    // Fallback if FbExtractor not in scope
     if (url) {
-      const reelMatch = url.match(/\/(?:reel|reels|share\/r)\/([a-zA-Z0-9_-]+)/i);
-      if (reelMatch) return reelMatch[1];
-
-      const watchMatch = url.match(/[?&]v=(\d+)/);
+      const numReel = url.match(/\/(?:reel|reels)\/(\d{6,30})/i);
+      if (numReel) return numReel[1];
+      const watchMatch = url.match(/[?&]v=(\d{6,30})/);
       if (watchMatch) return watchMatch[1];
-
-      const videoMatch = url.match(/\/videos\/(?:[^/]+\/)?(\d+)/);
+      const videoMatch = url.match(/\/videos\/(?:[^/]+\/)?(\d{6,30})/);
       if (videoMatch) return videoMatch[1];
     }
-
-    // Priority 2: Element's own authoritative data attributes
     if (element) {
       const rawReelId = element.getAttribute("data-reel-id");
-      if (rawReelId && !rawReelId.startsWith("vid_")) return rawReelId;
-
+      if (rawReelId && /^\d{6,30}$/.test(rawReelId.trim())) return rawReelId.trim();
       const rawVideoId = element.getAttribute("data-video-id");
-      if (rawVideoId && !rawVideoId.startsWith("vid_")) return rawVideoId;
-
-      // Priority 3: Check parent containers for Facebook metadata
+      if (rawVideoId && /^\d{6,30}$/.test(rawVideoId.trim())) return rawVideoId.trim();
       const postContainer = element.closest('[data-video-id], [data-reel-id], [data-store*="video_id"]');
       if (postContainer) {
         const directId = postContainer.getAttribute("data-video-id") || postContainer.getAttribute("data-reel-id");
-        if (directId && !directId.startsWith("vid_")) return directId;
+        if (directId && /^\d{6,30}$/.test(directId.trim())) return directId.trim();
         const dataStore = postContainer.getAttribute("data-store");
-        const match = dataStore?.match(/"(?:video_id|reel_id)":\s*"?(\d+)"?/);
+        const match = dataStore?.match(/"(?:video_id|reel_id)":\s*"?(\d{6,30})"?/);
         if (match) return match[1];
       }
     }
-
-    // Priority 4: URL pathname (current page)
-    const pathReel = window.location.pathname.match(/\/(?:reel|reels|share\/r)\/([a-zA-Z0-9_-]+)/i);
-    if (pathReel) return pathReel[1];
-    const pathVideo = window.location.pathname.match(/\/videos\/(\d+)/);
-    if (pathVideo) return pathVideo[1];
-
     return null;
   }
 
@@ -384,8 +373,17 @@
     let isDashSeparate = false;
     const scriptUrls = extractUrlsFromScripts();
 
-    // Dynamically re-evaluate authoritative Facebook videoId at download time
-    const authoritativeVideoId = videoInfo.videoId || (videoInfo.element ? extractVideoId(videoInfo.postLink, videoInfo.element) : null);
+    // Dynamically re-evaluate authoritative Facebook numeric videoId from live DOM at download time (prevents stale closure)
+    const liveDomId = videoInfo.element ? extractVideoId(videoInfo.postLink, videoInfo.element) : null;
+    const storedNumericId = videoInfo.videoId && /^\d{6,30}$/.test(videoInfo.videoId) ? videoInfo.videoId : null;
+    const authoritativeVideoId = liveDomId || storedNumericId;
+
+    if (authoritativeVideoId) {
+      videoInfo.videoId = authoritativeVideoId;
+      if (videoInfo.element) {
+        videoInfo.element.setAttribute("data-reel-id", authoritativeVideoId);
+      }
+    }
 
     let streamMatch = null;
     if (authoritativeVideoId && scriptUrls.has(authoritativeVideoId)) {
