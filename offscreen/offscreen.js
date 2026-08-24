@@ -4,6 +4,8 @@
  * Author: Bin.Late
  */
 
+const MAX_BUFFER_SIZE = 500 * 1024 * 1024; // 500MB
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "OFFSCREEN_MUX_MEDIA") {
     const { videoUrl, audioUrl } = message.payload || {};
@@ -35,6 +37,10 @@ async function handleOffscreenMux(videoUrl, audioUrl) {
   }
   const videoBuffer = await videoRes.arrayBuffer();
 
+  if (videoBuffer.byteLength > MAX_BUFFER_SIZE) {
+    throw new Error("Dung lượng video vượt quá giới hạn xử lý cho phép (500MB).");
+  }
+
   if (!audioUrl) {
     const videoBlob = new Blob([videoBuffer], { type: "video/mp4" });
     const blobUrl = URL.createObjectURL(videoBlob);
@@ -47,9 +53,22 @@ async function handleOffscreenMux(videoUrl, audioUrl) {
   }
   const audioBuffer = await audioRes.arrayBuffer();
 
-  const mergedBuffer = Mp4Muxer.mergeMp4Buffers(videoBuffer, audioBuffer);
-  const mergedBlob = new Blob([mergedBuffer], { type: "video/mp4" });
+  if (audioBuffer.byteLength > MAX_BUFFER_SIZE) {
+    throw new Error("Dung lượng âm thanh vượt quá giới hạn xử lý cho phép (500MB).");
+  }
+
+  const muxResult = Mp4Muxer.mergeMp4Buffers(videoBuffer, audioBuffer);
+  const outBuffer = muxResult && muxResult.buffer ? muxResult.buffer : (muxResult instanceof ArrayBuffer ? muxResult : videoBuffer);
+  const isMuxed = Boolean(muxResult && muxResult.muxed);
+
+  const mergedBlob = new Blob([outBuffer], { type: "video/mp4" });
   const blobUrl = URL.createObjectURL(mergedBlob);
 
-  return { success: true, blobUrl, isMuxed: true, hasAudio: true };
+  return {
+    success: true,
+    blobUrl,
+    isMuxed: isMuxed,
+    hasAudio: isMuxed,
+    reason: muxResult && muxResult.reason ? muxResult.reason : null
+  };
 }

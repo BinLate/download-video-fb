@@ -131,15 +131,27 @@ describe("FbExtractor (lib/extractor.js)", () => {
     assert.equal(FbExtractor.isValidMediaStream("https://scontent.xx.fbsbx.com/v/t1/file.mp4"), true);
     assert.equal(FbExtractor.isValidMediaStream("https://attacker.com/fbcdn.net/file.mp4"), false);
   });
+
+  it("should reject unauthorized or malicious media stream URLs", () => {
+    assert.equal(FbExtractor.isValidMediaStream("http://video-sin6-4.xx.fbcdn.net/file.mp4"), false, "HTTP insecure stream must be rejected");
+    assert.equal(FbExtractor.isValidMediaStream("https://attacker.example/audio.mp4"), false, "External host must be rejected");
+    assert.equal(FbExtractor.isValidMediaStream("javascript:alert(1)"), false, "Javascript scheme must be rejected");
+    assert.equal(FbExtractor.isValidMediaStream("data:video/mp4;base64,AAAA"), false, "Data scheme must be rejected");
+    assert.equal(FbExtractor.isValidMediaStream(null), false);
+  });
 });
 
 describe("Mp4Muxer (lib/mp4muxer.js)", () => {
-  it("should merge video and audio MP4 buffers into a single dual-track MP4", () => {
+  it("should merge video and audio MP4 buffers into a single dual-track MP4 and return explicit status", () => {
     const videoMp4 = createSampleMp4(1, false, [10, 20, 30, 40, 50]);
     const audioMp4 = createSampleMp4(1, true, [99, 88, 77]);
 
-    const merged = Mp4Muxer.mergeMp4Buffers(videoMp4, audioMp4);
-    assert.ok(merged, "Merged buffer must be returned");
+    const result = Mp4Muxer.mergeMp4Buffers(videoMp4, audioMp4);
+    assert.ok(result, "Result object must be returned");
+    assert.equal(result.muxed, true, "Must flag muxed as true");
+    assert.equal(result.tracks, 2, "Must contain 2 tracks");
+
+    const merged = result.buffer;
 
     // Verify boxes in merged file
     const ftyp = Mp4Muxer.findBoxByType(merged, "ftyp");
@@ -157,6 +169,29 @@ describe("Mp4Muxer (lib/mp4muxer.js)", () => {
     // Verify moov contains 2 trak boxes
     const traks = Mp4Muxer.findBoxes(merged, moov.start + moov.headerSize, moov.end).filter(b => b.type === "trak");
     assert.equal(traks.length, 2, "Must contain exactly 2 trak boxes (video track 1 and audio track 2)");
+  });
+
+  it("should detect and reject fragmented MP4 buffers", () => {
+    const ftyp = createBox("ftyp", new Uint8Array([0x69, 0x73, 0x6f, 0x6d]));
+    const moof = createBox("moof", new Uint8Array([0, 0, 0, 1]));
+    const fmp4 = new Uint8Array(ftyp.length + moof.length);
+    fmp4.set(ftyp, 0);
+    fmp4.set(moof, ftyp.length);
+
+    assert.equal(Mp4Muxer.hasFragmentedBoxes(fmp4.buffer), true, "Must detect moof box");
+
+    const normalAudio = createSampleMp4(1, true, [1, 2]);
+    const res = Mp4Muxer.mergeMp4Buffers(fmp4.buffer, normalAudio);
+    assert.equal(res.muxed, false, "Must not claim fragmented MP4 as muxed");
+    assert.equal(res.reason, "fragmented_mp4_not_supported");
+  });
+
+  it("should report missing moov or mdat box explicitly", () => {
+    const brokenBuffer = new Uint8Array([0, 0, 0, 8, 0x66, 0x74, 0x79, 0x70]).buffer;
+    const normalAudio = createSampleMp4(1, true, [1, 2]);
+    const res = Mp4Muxer.mergeMp4Buffers(brokenBuffer, normalAudio);
+    assert.equal(res.muxed, false);
+    assert.equal(res.reason, "missing_moov_or_mdat");
   });
 });
 
@@ -361,8 +396,9 @@ describe("Offscreen Architecture & MV3 Pipeline Integration", () => {
     // 2. Offscreen muxing simulation
     const videoMp4 = createSampleMp4(1, false, [1, 2, 3]);
     const audioMp4 = createSampleMp4(1, true, [4, 5]);
-    const merged = Mp4Muxer.mergeMp4Buffers(videoMp4, audioMp4);
-    assert.ok(merged.byteLength > 0);
+    const muxResult = Mp4Muxer.mergeMp4Buffers(videoMp4, audioMp4);
+    assert.equal(muxResult.muxed, true);
+    assert.ok(muxResult.buffer.byteLength > 0);
 
     // 3. Mock blob URL creation in DOM environment
     const fakeBlobUrl = "blob:chrome-extension://mock-id/12345-6789";

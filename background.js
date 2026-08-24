@@ -812,6 +812,9 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
 
     // 5. If this is a separate DASH stream (video + audio), mux them via offscreen!
     if (resolvedUrl && resolvedAudioUrl && resolvedDashSeparate) {
+      if (!FbExtractor.isValidMediaStream(resolvedAudioUrl)) {
+        throw new Error("Đường dẫn âm thanh không hợp lệ hoặc không thuộc máy chủ Facebook.");
+      }
       const offscreenReady = await ensureOffscreenDocument();
       if (!offscreenReady) {
         throw new Error("Không thể khởi tạo bộ ghép video/âm thanh (Offscreen Document không khả dụng).");
