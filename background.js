@@ -953,7 +953,7 @@ async function downloadMedia({ url, isInternalBlob = false, type = "video", titl
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const filename = `BinLate_FB_${type.toUpperCase()}_${quality}_${cleanTitle}_${timestamp}.mp4`;
 
-  const pendingToken = isBlob ? BlobManager.beginPendingRegistration(targetUrl) : null;
+  const pendingToken = isBlob ? await BlobManager.beginPendingRegistration(targetUrl) : null;
 
   return new Promise((resolve, reject) => {
     chrome.downloads.download(
@@ -967,13 +967,21 @@ async function downloadMedia({ url, isInternalBlob = false, type = "video", titl
         if (chrome.runtime.lastError) {
           const err = new Error(chrome.runtime.lastError.message);
           if (isBlob) {
-            BlobManager.cancelPendingRegistration(pendingToken);
+            await BlobManager.cancelPendingRegistration(pendingToken);
             await BlobManager.revokeBlobUrl(targetUrl);
           }
           reject(err);
         } else {
           if (isBlob) {
-            await BlobManager.completePendingRegistration(pendingToken, downloadId, targetUrl);
+            try {
+              await BlobManager.completePendingRegistration(pendingToken, downloadId, targetUrl);
+            } catch (storageErr) {
+              console.warn("[Bin.Late FB Downloader] Failed to complete blob registration; revoking:", storageErr.message);
+              await BlobManager.cancelPendingRegistration(pendingToken);
+              await BlobManager.revokeBlobUrl(targetUrl);
+              reject(storageErr);
+              return;
+            }
           }
           resolve(downloadId);
         }

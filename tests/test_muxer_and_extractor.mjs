@@ -170,7 +170,7 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
           cb({});
           delete globalThis.chrome;
         } else {
-          cb({ [key]: memory[key] ? { ...memory[key] } : {} });
+          cb({ [key]: memory[key] ? JSON.parse(JSON.stringify(memory[key])) : {} });
         }
       },
       set: (obj, cb) => {
@@ -179,7 +179,7 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
           cb();
           delete globalThis.chrome;
         } else {
-          memory = { ...memory, ...obj };
+          memory = { ...memory, ...JSON.parse(JSON.stringify(obj)) };
           if (cb) cb();
         }
       },
@@ -252,9 +252,9 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
     ]);
 
     const dump = storage.dump()[BlobManager.STORAGE_KEY];
-    assert.equal(Object.keys(dump).length, 5, "All 5 concurrent registrations must be persisted");
-    assert.equal(dump["201"], "blob:test/201");
-    assert.equal(dump["205"], "blob:test/205");
+    assert.equal(Object.keys(dump.active).length, 5, "All 5 concurrent registrations must be persisted");
+    assert.equal(dump.active["201"], "blob:test/201");
+    assert.equal(dump.active["205"], "blob:test/205");
   });
 
   it("should serialize concurrent unregister operations without race conditions", async () => {
@@ -283,9 +283,9 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
     await BlobManager.registerBlobDownload(401, "blob:test/401", storage);
 
     // Download B starts muxing/pending registration
-    const pendingTokenB = BlobManager.beginPendingRegistration("blob:test/402");
+    const pendingTokenB = await BlobManager.beginPendingRegistration("blob:test/402", storage);
 
-    // Download A completes and unregisters -> storage now has 0 items, but B is pending!
+    // Download A completes and unregisters -> storage now has 0 active items, but B is durable pending!
     const urlA = await BlobManager.unregisterBlobDownload(401, storage);
     await BlobManager.revokeBlobUrl(urlA, { offscreenCloser: mockCloser, storageApi: storage });
 
@@ -300,6 +300,24 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
 
     // Now that both are done, offscreen closes
     assert.equal(offscreenClosed, true, "Offscreen document should close once all downloads finish");
+  });
+
+  it("should survive service-worker restart during pending registration and complete cleanly", async () => {
+    const storage = createMockSessionStorage();
+
+    // 1. Worker 1 begins pending registration
+    const token = await BlobManager.beginPendingRegistration("blob:test/pending-restart", storage);
+    assert.ok(token);
+
+    // 2. Simulate worker termination and fresh worker restart (in-memory state empty, storage intact)
+    const hasPending = await BlobManager.hasActiveBlobDownloads(storage);
+    assert.equal(hasPending, true, "Fresh worker must detect pending download from session storage");
+
+    // 3. Fresh worker completes registration upon chrome.downloads callback
+    await BlobManager.completePendingRegistration(token, 601, "blob:test/pending-restart", storage);
+    const dump = storage.dump()[BlobManager.STORAGE_KEY];
+    assert.equal(dump.active["601"], "blob:test/pending-restart");
+    assert.equal(dump.pending[token], undefined, "Pending token must be removed upon active registration");
   });
 
   it("should fail-safe and keep offscreen open on storage get failure", async () => {
