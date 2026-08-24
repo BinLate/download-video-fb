@@ -693,6 +693,63 @@ function nudgeAndAwaitCapture(tabId, waitMs = 1000) {
   });
 }
 
+let offscreenCreating = null;
+
+async function hasOffscreenDoc() {
+  if (typeof chrome.offscreen?.hasDocument === "function") {
+    return await chrome.offscreen.hasDocument();
+  }
+  if (typeof chrome.runtime?.getContexts === "function") {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"]
+    }).catch(() => []);
+    return contexts && contexts.length > 0;
+  }
+  return false;
+}
+
+async function ensureOffscreenDocument() {
+  if (typeof chrome.offscreen === "undefined") {
+    return false;
+  }
+  if (await hasOffscreenDoc()) {
+    return true;
+  }
+  if (offscreenCreating) {
+    await offscreenCreating;
+    return true;
+  }
+
+  offscreenCreating = chrome.offscreen.createDocument({
+    url: "offscreen/offscreen.html",
+    reasons: ["BLOBS"],
+    justification: "Ghép luồng video và âm thanh DASH thành file MP4 hoàn chỉnh"
+  });
+
+  try {
+    await offscreenCreating;
+    return true;
+  } catch (err) {
+    console.warn("[Bin.Late FB Downloader] Offscreen creation error:", err);
+    return false;
+  } finally {
+    offscreenCreating = null;
+  }
+}
+
+// Track active blob URLs for revocation on completion
+const activeBlobDownloads = new Map(); // downloadId -> blobUrl
+
+chrome.downloads.onChanged.addListener((delta) => {
+  if (delta.state && (delta.state.current === "complete" || delta.state.current === "interrupted")) {
+    const blobUrl = activeBlobDownloads.get(delta.id);
+    if (blobUrl) {
+      activeBlobDownloads.delete(delta.id);
+      chrome.runtime.sendMessage({ action: "OFFSCREEN_REVOKE_URL", blobUrl }).catch(() => {});
+    }
+  }
+});
+
 /**
  * Unified download flow.
  */
@@ -757,16 +814,36 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       );
     }
 
-    // 5. If this is a separate DASH stream (video + audio), mux them together!
-    if (resolvedUrl && resolvedAudioUrl && resolvedDashSeparate && typeof Mp4Muxer !== "undefined") {
-      try {
-        const muxed = await Mp4Muxer.fetchAndMuxMedia(resolvedUrl, resolvedAudioUrl);
-        if (muxed && muxed.blobUrl) {
-          resolvedUrl = muxed.blobUrl;
-        }
-      } catch (muxErr) {
-        console.warn("[Bin.Late FB Downloader] Muxing error, downloading video stream directly:", muxErr);
+    // 5. If this is a separate DASH stream (video + audio), mux them via offscreen!
+    if (resolvedUrl && resolvedAudioUrl && resolvedDashSeparate) {
+      const offscreenReady = await ensureOffscreenDocument();
+      if (!offscreenReady) {
+        throw new Error("Không thể khởi tạo bộ ghép video/âm thanh (Offscreen Document không khả dụng).");
       }
+
+      const muxResponse = await new Promise((resolve) => {
+        chrome.runtime.sendMessage(
+          {
+            action: "OFFSCREEN_MUX_MEDIA",
+            payload: { videoUrl: resolvedUrl, audioUrl: resolvedAudioUrl }
+          },
+          (res) => {
+            if (chrome.runtime.lastError) {
+              resolve({ success: false, error: chrome.runtime.lastError.message });
+            } else {
+              resolve(res || { success: false, error: "Không nhận được phản hồi từ bộ ghép." });
+            }
+          }
+        );
+      });
+
+      if (!muxResponse || !muxResponse.success || !muxResponse.blobUrl) {
+        throw new Error(
+          `Ghép âm thanh và hình ảnh thất bại: ${muxResponse?.error || "Không thể tạo file MP4"}.`
+        );
+      }
+
+      resolvedUrl = muxResponse.blobUrl;
     }
 
     return await downloadMedia({
@@ -870,6 +947,9 @@ async function downloadMedia({ url, type = "video", title = "facebook", quality 
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message));
         } else {
+          if (cleanUrl.startsWith("blob:")) {
+            activeBlobDownloads.set(downloadId, cleanUrl);
+          }
           resolve(downloadId);
         }
       }

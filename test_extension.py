@@ -1,6 +1,6 @@
 """
 Unit tests for Download Video / Reel Facebook Chrome Extension.
-Tests manifest integrity, DASH manifest parsing, in-browser MP4 muxing, and CDN classification.
+Tests manifest integrity, DASH manifest parsing, in-browser MP4 muxing, offscreen architecture, and CDN classification.
 Directly executes production JavaScript modules (lib/extractor.js and lib/mp4muxer.js) via Node.js.
 """
 
@@ -29,7 +29,7 @@ class TestExtensionManifest(unittest.TestCase):
 
     def test_required_permissions(self):
         permissions = self.manifest.get("permissions", [])
-        for perm in ["downloads", "activeTab", "contextMenus", "webRequest", "storage"]:
+        for perm in ["downloads", "activeTab", "contextMenus", "webRequest", "storage", "offscreen"]:
             self.assertIn(perm, permissions, f"Missing permission: {perm}")
 
     def test_host_permissions(self):
@@ -44,6 +44,12 @@ class TestExtensionManifest(unittest.TestCase):
         self.assertTrue(len(content_scripts) > 0)
         self.assertIn("content/content.js", content_scripts[0].get("js", []))
         self.assertIn("lib/extractor.js", content_scripts[0].get("js", []))
+
+    def test_offscreen_files(self):
+        offscreen_html = WORKSPACE_ROOT / "offscreen" / "offscreen.html"
+        offscreen_js = WORKSPACE_ROOT / "offscreen" / "offscreen.js"
+        self.assertTrue(offscreen_html.exists(), "offscreen/offscreen.html must exist")
+        self.assertTrue(offscreen_js.exists(), "offscreen/offscreen.js must exist")
 
 
 class TestProductionJsExecution(unittest.TestCase):
@@ -65,7 +71,7 @@ class TestProductionJsExecution(unittest.TestCase):
             0,
             f"Node.js test suite failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
-        self.assertIn("pass 6", proc.stdout)
+        self.assertIn("pass 7", proc.stdout)
 
 
 class TestCdnUrlClassification(unittest.TestCase):

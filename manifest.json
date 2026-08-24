@@ -26,7 +26,8 @@
     "activeTab",
     "contextMenus",
     "webRequest",
-    "storage"
+    "storage",
+    "offscreen"
   ],
   "host_permissions": [
     "*://*.facebook.com/*",

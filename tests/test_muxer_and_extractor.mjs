@@ -1,6 +1,6 @@
 /**
  * Node.js Unit & Integration Test Suite
- * Directly exercises production JS modules: lib/extractor.js and lib/mp4muxer.js
+ * Directly exercises production JS modules: lib/extractor.js, lib/mp4muxer.js, and offscreen architecture.
  */
 
 import { describe, it } from "node:test";
@@ -14,6 +14,7 @@ import Mp4Muxer from "../lib/mp4muxer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const rootDir = path.resolve(__dirname, "..");
 
 describe("FbExtractor (lib/extractor.js)", () => {
   const SAMPLE_DASH_XML = `
@@ -156,5 +157,19 @@ describe("Mp4Muxer (lib/mp4muxer.js)", () => {
     // Verify moov contains 2 trak boxes
     const traks = Mp4Muxer.findBoxes(merged, moov.start + moov.headerSize, moov.end).filter(b => b.type === "trak");
     assert.equal(traks.length, 2, "Must contain exactly 2 trak boxes (video track 1 and audio track 2)");
+  });
+});
+
+describe("Offscreen Architecture & MV3 Integration", () => {
+  it("should have valid offscreen document files and manifest permissions", () => {
+    const htmlPath = path.join(rootDir, "offscreen", "offscreen.html");
+    const jsPath = path.join(rootDir, "offscreen", "offscreen.js");
+    const manifestPath = path.join(rootDir, "manifest.json");
+
+    assert.ok(fs.existsSync(htmlPath), "offscreen.html must exist");
+    assert.ok(fs.existsSync(jsPath), "offscreen.js must exist");
+
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+    assert.ok(manifest.permissions.includes("offscreen"), "manifest.json must have 'offscreen' permission");
   });
 });
