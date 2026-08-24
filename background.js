@@ -529,7 +529,6 @@ function isFacebookMediaHost(hostname) {
  */
 function isValidMediaStream(u) {
   if (!u || typeof u !== "string") return false;
-  if (u.startsWith("blob:")) return true;
   let parsed;
   try {
     parsed = new URL(u);
@@ -844,10 +843,18 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       }
 
       resolvedUrl = muxResponse.blobUrl;
+      return await downloadMedia({
+        url: resolvedUrl,
+        isInternalBlob: true,
+        type: type,
+        title: title,
+        quality: quality
+      });
     }
 
     return await downloadMedia({
       url: resolvedUrl,
+      isInternalBlob: false,
       type: type,
       title: title,
       quality: quality
@@ -915,17 +922,31 @@ function sanitizeFilename(name) {
     .substring(0, 60);
 }
 
-async function downloadMedia({ url, type = "video", title = "facebook", quality = "HD" }) {
-  const cleanUrl = cleanMediaUrl(url);
-  if (!cleanUrl) {
+async function downloadMedia({ url, isInternalBlob = false, type = "video", title = "facebook", quality = "HD" }) {
+  if (!url || typeof url !== "string") {
     throw new Error("No valid media URL provided for download");
+  }
+
+  let targetUrl = null;
+  const isBlob = url.startsWith("blob:");
+
+  if (isBlob) {
+    if (!isInternalBlob) {
+      throw new Error("Direct external blob URL download is not permitted.");
+    }
+    targetUrl = url;
+  } else {
+    targetUrl = cleanMediaUrl(url);
+    if (!targetUrl || !isValidMediaStream(targetUrl)) {
+      throw new Error("No valid Facebook CDN media URL provided for download");
+    }
   }
 
   let mediaPath = "";
   try {
-    mediaPath = new URL(cleanUrl).pathname.toLowerCase();
+    mediaPath = new URL(targetUrl).pathname.toLowerCase();
   } catch (_) {
-    mediaPath = String(cleanUrl).split("?")[0].toLowerCase();
+    mediaPath = String(targetUrl).split("?")[0].toLowerCase();
   }
   if (mediaPath.endsWith(".mpd")) {
     throw new Error("Luồng tải được là manifest DASH (.mpd), không phải video MP4.");
@@ -938,7 +959,7 @@ async function downloadMedia({ url, type = "video", title = "facebook", quality 
   return new Promise((resolve, reject) => {
     chrome.downloads.download(
       {
-        url: cleanUrl,
+        url: targetUrl,
         filename: filename,
         saveAs: false,
         conflictAction: "uniquify"
@@ -947,8 +968,8 @@ async function downloadMedia({ url, type = "video", title = "facebook", quality 
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message));
         } else {
-          if (cleanUrl.startsWith("blob:")) {
-            activeBlobDownloads.set(downloadId, cleanUrl);
+          if (isBlob) {
+            activeBlobDownloads.set(downloadId, targetUrl);
           }
           resolve(downloadId);
         }
