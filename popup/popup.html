@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Download Video / Reel Facebook</title>
+  <link rel="stylesheet" href="popup.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-brand">
+        <div class="logo-wrapper">
+          <img src="../icons/icon48.png" alt="Logo" class="app-logo">
+        </div>
+        <div class="header-titles">
+          <h1 class="app-title">FB Downloader</h1>
+          <div class="app-sub">
+            <span class="author-badge">Tác giả: <strong>Bin.Late</strong></span>
+            <span class="version-tag">v1.0.0</span>
+          </div>
+        </div>
+      </div>
+      <div class="status-indicator" id="statusIndicator" title="Trạng thái kết nối">
+        <span class="status-dot"></span>
+        <span class="status-text" id="statusText">Đang kiểm tra...</span>
+      </div>
+    </header>
+
+    <!-- Main Navigation Tabs -->
+    <nav class="nav-tabs">
+      <button type="button" class="tab-btn active" data-tab="tab-detected">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        <span>Video phát hiện (<span id="detectedCount">0</span>)</span>
+      </button>
+      <button type="button" class="tab-btn" data-tab="tab-manual">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        <span>Tải qua Link</span>
+      </button>
+    </nav>
+
+    <!-- Tab 1: Detected Videos List -->
+    <section id="tab-detected" class="tab-content active">
+      <div class="tab-toolbar">
+        <span class="toolbar-title">Danh sách Video & Reel trên trang</span>
+        <button type="button" id="btnRescan" class="btn-secondary-sm" title="Quét lại nội dung trang">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+          Quét lại
+        </button>
+      </div>
+
+      <div id="videoListContainer" class="video-list">
+        <!-- Dynamic list of video cards or empty state -->
+      </div>
+    </section>
+
+    <!-- Tab 2: Manual Link Downloader -->
+    <section id="tab-manual" class="tab-content">
+      <div class="manual-card">
+        <label for="inputVideoUrl" class="input-label">Dán liên kết Video hoặc Reel Facebook:</label>
+        <div class="input-group">
+          <input type="text" id="inputVideoUrl" placeholder="https://www.facebook.com/reel/... hoặc /watch/?v=..." autocomplete="off">
+          <button type="button" id="btnClearUrl" class="btn-icon" title="Xóa">✕</button>
+        </div>
+        <div class="manual-actions">
+          <button type="button" id="btnDownloadHd" class="btn-primary">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Tải chất lượng HD
+          </button>
+          <button type="button" id="btnDownloadSd" class="btn-secondary">
+            Tải chuẩn SD
+          </button>
+        </div>
+        <div class="tip-box">
+          💡 <strong>Mẹo:</strong> Bạn cũng có thể rê chuột trực tiếp vào bất kỳ video/reel nào trên Facebook để bấm nút <strong>"Tải Video"</strong> nổi tiện lợi!
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <div class="footer-left">
+        <span>Phát triển bởi <strong class="author-highlight">Bin.Late</strong></span>
+      </div>
+      <div class="footer-right">
+        <span class="safe-badge">🛡️ An toàn & Không lưu trữ</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

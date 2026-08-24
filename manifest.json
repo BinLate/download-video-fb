@@ -1,0 +1,61 @@
+{
+  "manifest_version": 3,
+  "name": "Download Video / Reel Facebook",
+  "version": "1.0.2",
+  "description": "Tiện ích mở rộng hỗ trợ tải xuống Video và Reels Facebook chất lượng cao (HD/SD). Tác giả: Bin.Late",
+  "author": "Bin.Late",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Download Video / Reel Facebook (by Bin.Late)"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "downloads",
+    "activeTab",
+    "contextMenus",
+    "webRequest",
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.facebook.com/*",
+    "*://*.fbcdn.net/*",
+    "*://*.fbsbx.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.facebook.com/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "css": [
+        "content/content.css"
+      ],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/*"
+      ],
+      "matches": [
+        "*://*.facebook.com/*"
+      ]
+    }
+  ]
+}

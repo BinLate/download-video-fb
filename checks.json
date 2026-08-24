@@ -1,0 +1,8 @@
+[
+  {
+    "check_id": "test_extension",
+    "category": "FOCUSED_TEST",
+    "command": "python test_extension.py",
+    "required": true
+  }
+]
