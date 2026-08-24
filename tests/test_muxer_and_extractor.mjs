@@ -161,13 +161,27 @@ describe("Mp4Muxer (lib/mp4muxer.js)", () => {
 });
 
 describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
-  function createMockSessionStorage() {
+  function createMockSessionStorage({ getError = null, setError = null } = {}) {
     let memory = {};
     return {
-      get: (key, cb) => cb({ [key]: { ...memory[key] } }),
+      get: (key, cb) => {
+        if (getError) {
+          globalThis.chrome = { runtime: { lastError: { message: getError } } };
+          cb({});
+          delete globalThis.chrome;
+        } else {
+          cb({ [key]: memory[key] ? { ...memory[key] } : {} });
+        }
+      },
       set: (obj, cb) => {
-        memory = { ...memory, ...obj };
-        if (cb) cb();
+        if (setError) {
+          globalThis.chrome = { runtime: { lastError: { message: setError } } };
+          cb();
+          delete globalThis.chrome;
+        } else {
+          memory = { ...memory, ...obj };
+          if (cb) cb();
+        }
       },
       dump: () => memory
     };
@@ -191,7 +205,6 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
     assert.equal(await BlobManager.hasActiveBlobDownloads(storage), true);
 
     // 2. Simulate Service Worker restart (in-memory variables lost, storage persists)
-    // Worker wakes up when download 101 finishes
     const retrievedUrl = await BlobManager.unregisterBlobDownload(101, storage);
     assert.equal(retrievedUrl, blobUrl, "Must retrieve Blob URL from session storage after restart");
 
@@ -224,6 +237,85 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
     });
 
     assert.equal(revokedUrls.includes(failedBlobUrl), true, "Failed download Blob URL must be immediately revoked");
+  });
+
+  it("should serialize concurrent registerBlobDownload calls without dropping entries", async () => {
+    const storage = createMockSessionStorage();
+
+    // Start 5 concurrent registrations
+    await Promise.all([
+      BlobManager.registerBlobDownload(201, "blob:test/201", storage),
+      BlobManager.registerBlobDownload(202, "blob:test/202", storage),
+      BlobManager.registerBlobDownload(203, "blob:test/203", storage),
+      BlobManager.registerBlobDownload(204, "blob:test/204", storage),
+      BlobManager.registerBlobDownload(205, "blob:test/205", storage)
+    ]);
+
+    const dump = storage.dump()[BlobManager.STORAGE_KEY];
+    assert.equal(Object.keys(dump).length, 5, "All 5 concurrent registrations must be persisted");
+    assert.equal(dump["201"], "blob:test/201");
+    assert.equal(dump["205"], "blob:test/205");
+  });
+
+  it("should serialize concurrent unregister operations without race conditions", async () => {
+    const storage = createMockSessionStorage();
+    await BlobManager.registerBlobDownload(301, "blob:test/301", storage);
+    await BlobManager.registerBlobDownload(302, "blob:test/302", storage);
+
+    const [u1, u2] = await Promise.all([
+      BlobManager.unregisterBlobDownload(301, storage),
+      BlobManager.unregisterBlobDownload(302, storage)
+    ]);
+
+    assert.equal(u1, "blob:test/301");
+    assert.equal(u2, "blob:test/302");
+    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), false);
+  });
+
+  it("should NOT close offscreen document while another Blob download registration is still pending", async () => {
+    const storage = createMockSessionStorage();
+    let offscreenClosed = false;
+    const mockCloser = async () => {
+      offscreenClosed = true;
+    };
+
+    // Download A is registered
+    await BlobManager.registerBlobDownload(401, "blob:test/401", storage);
+
+    // Download B starts muxing/pending registration
+    const pendingTokenB = BlobManager.beginPendingRegistration("blob:test/402");
+
+    // Download A completes and unregisters -> storage now has 0 items, but B is pending!
+    const urlA = await BlobManager.unregisterBlobDownload(401, storage);
+    await BlobManager.revokeBlobUrl(urlA, { offscreenCloser: mockCloser, storageApi: storage });
+
+    // Offscreen document MUST remain open because B is pending
+    assert.equal(offscreenClosed, false, "Offscreen document must NOT close while B is pending registration");
+    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), true);
+
+    // Now B completes registration and then finishes
+    await BlobManager.completePendingRegistration(pendingTokenB, 402, "blob:test/402", storage);
+    const urlB = await BlobManager.unregisterBlobDownload(402, storage);
+    await BlobManager.revokeBlobUrl(urlB, { offscreenCloser: mockCloser, storageApi: storage });
+
+    // Now that both are done, offscreen closes
+    assert.equal(offscreenClosed, true, "Offscreen document should close once all downloads finish");
+  });
+
+  it("should fail-safe and keep offscreen open on storage get failure", async () => {
+    const brokenStorage = createMockSessionStorage({ getError: "Simulated storage failure" });
+    const isActive = await BlobManager.hasActiveBlobDownloads(brokenStorage);
+    assert.equal(isActive, true, "Must fail-safe to true on storage read failure");
+  });
+
+  it("should reject and propagate error on storage set failure", async () => {
+    const brokenStorage = createMockSessionStorage({ setError: "Simulated quota error" });
+    await assert.rejects(
+      async () => {
+        await BlobManager.registerBlobDownload(501, "blob:test/501", brokenStorage);
+      },
+      /Simulated quota error/
+    );
   });
 });
 
