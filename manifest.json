@@ -39,6 +39,7 @@
         "*://*.facebook.com/*"
       ],
       "js": [
+        "lib/extractor.js",
         "content/content.js"
       ],
       "css": [

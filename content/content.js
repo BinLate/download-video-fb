@@ -475,27 +475,27 @@
     showToast(`Đang chuẩn bị tải ${videoInfo.type.toUpperCase()} (${quality})...`);
 
     let downloadUrl = null;
+    let audioUrl = null;
+    let isDashSeparate = false;
     const scriptUrls = extractUrlsFromScripts();
 
-    // Match exact videoId to its streams
+    let streamMatch = null;
     if (videoInfo.videoId && scriptUrls.has(videoInfo.videoId)) {
-      const match = scriptUrls.get(videoInfo.videoId);
-      if (quality === "HD" && match.hdUrl) {
-        downloadUrl = match.hdUrl;
-      } else if (match.sdUrl) {
-        downloadUrl = match.sdUrl;
-      } else if (match.hdUrl) {
-        downloadUrl = match.hdUrl;
-      }
+      streamMatch = scriptUrls.get(videoInfo.videoId);
     } else if (scriptUrls.has("fallback_any")) {
-      const match = scriptUrls.get("fallback_any");
-      if (quality === "HD" && match.hdUrl) {
-        downloadUrl = match.hdUrl;
-      } else if (match.sdUrl) {
-        downloadUrl = match.sdUrl;
-      } else if (match.hdUrl) {
-        downloadUrl = match.hdUrl;
+      streamMatch = scriptUrls.get("fallback_any");
+    }
+
+    if (streamMatch) {
+      if (quality === "HD" && streamMatch.hdUrl) {
+        downloadUrl = streamMatch.hdUrl;
+      } else if (streamMatch.sdUrl) {
+        downloadUrl = streamMatch.sdUrl;
+      } else if (streamMatch.hdUrl) {
+        downloadUrl = streamMatch.hdUrl;
       }
+      audioUrl = streamMatch.audioUrl || null;
+      isDashSeparate = !!streamMatch.isDashSeparate;
     }
 
     const looksLikeMediaUrl = (candidate) => {
@@ -526,6 +526,8 @@
         action: "DOWNLOAD_FILE",
         payload: {
           url: downloadUrl,
+          audioUrl: audioUrl,
+          isDashSeparate: isDashSeparate,
           postUrl: videoInfo.postLink || window.location.href,
           videoId: videoInfo.videoId,
           selectedSource:

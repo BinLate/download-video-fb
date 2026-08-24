@@ -3,6 +3,8 @@
  * Author: Bin.Late
  */
 
+importScripts("lib/extractor.js", "lib/mp4muxer.js");
+
 const tabVideosMap = new Map();
 // tabId -> { sessionId, armedAt, list: [{url, videoTyped, ts, session}] }
 // Captures are ONLY recorded while an extraction session is armed for the tab,
@@ -527,7 +529,7 @@ function isFacebookMediaHost(hostname) {
  */
 function isValidMediaStream(u) {
   if (!u || typeof u !== "string") return false;
-  if (u.startsWith("blob:")) return false;
+  if (u.startsWith("blob:")) return true;
   let parsed;
   try {
     parsed = new URL(u);
@@ -571,11 +573,9 @@ async function resolveFacebookVideoUrl(targetUrl, preferredQuality = "HD") {
         return null;
       }
       const html = await response.text();
-      const streams = extractStreamsFromHtml(html);
+      const streams = FbExtractor.extractStreamsFromText(html);
       if (streams) {
-        if (preferredQuality === "HD" && streams.hdUrl) return streams.hdUrl;
-        if (streams.sdUrl) return streams.sdUrl;
-        if (streams.hdUrl) return streams.hdUrl;
+        return streams;
       }
 
       if (response.url && response.url !== url && /facebook\.com/i.test(response.url)) {
@@ -696,8 +696,10 @@ function nudgeAndAwaitCapture(tabId, waitMs = 1000) {
 /**
  * Unified download flow.
  */
-async function handleDownloadFlow({ url, postUrl, tabId, type = "video", title = "facebook", quality = "HD", selectedSource = null }) {
+async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false, postUrl, tabId, type = "video", title = "facebook", quality = "HD", selectedSource = null }) {
   let resolvedUrl = null;
+  let resolvedAudioUrl = audioUrl;
+  let resolvedDashSeparate = isDashSeparate;
 
   const captureSessionId = armCaptureSession(tabId);
 
@@ -725,7 +727,16 @@ async function handleDownloadFlow({ url, postUrl, tabId, type = "video", title =
     !resolvedUrl &&
     lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")
   ) {
-    resolvedUrl = await resolveFacebookVideoUrl(lookupTarget, quality);
+    const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
+    if (streamInfo) {
+      if (typeof streamInfo === "string") {
+        resolvedUrl = streamInfo;
+      } else {
+        resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
+        resolvedAudioUrl = streamInfo.audioUrl || null;
+        resolvedDashSeparate = !!streamInfo.isDashSeparate;
+      }
+    }
   }
 
   // 4. Fall back to streams captured during THIS extraction session
@@ -744,6 +755,18 @@ async function handleDownloadFlow({ url, postUrl, tabId, type = "video", title =
         "Hãy mở video/reel trên Facebook, phát video vài giây rồi thử lại " +
         "(hoặc dùng nút 'Tải Reel' hiển thị ngay trên video)." + captureHint
       );
+    }
+
+    // 5. If this is a separate DASH stream (video + audio), mux them together!
+    if (resolvedUrl && resolvedAudioUrl && resolvedDashSeparate && typeof Mp4Muxer !== "undefined") {
+      try {
+        const muxed = await Mp4Muxer.fetchAndMuxMedia(resolvedUrl, resolvedAudioUrl);
+        if (muxed && muxed.blobUrl) {
+          resolvedUrl = muxed.blobUrl;
+        }
+      } catch (muxErr) {
+        console.warn("[Bin.Late FB Downloader] Muxing error, downloading video stream directly:", muxErr);
+      }
     }
 
     return await downloadMedia({
