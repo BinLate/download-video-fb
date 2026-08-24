@@ -141,6 +141,125 @@ describe("FbExtractor (lib/extractor.js)", () => {
   });
 });
 
+describe("Stream Budget & Memory Protection (fetchWithBudget)", () => {
+  it("should reject responses with Content-Length exceeding the budget before body read", async () => {
+    let bodyRead = false;
+    const mockFetch = async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map([["content-length", "300000000"]]), // 300MB
+      body: {
+        getReader: () => {
+          bodyRead = true;
+          return {
+            read: async () => ({ done: true, value: undefined }),
+            cancel: async () => {}
+          };
+        }
+      }
+    });
+
+    await assert.rejects(
+      async () => {
+        await FbExtractor.fetchWithBudget("https://video.fbcdn.net/test.mp4", 250 * 1024 * 1024, mockFetch);
+      },
+      /vượt quá hạn mức bộ nhớ/
+    );
+
+    assert.equal(bodyRead, false, "Must NOT open body reader when Content-Length exceeds budget");
+  });
+
+  it("should stream chunks and cancel reader immediately when accumulated bytes exceed budget", async () => {
+    let readerCancelled = false;
+    const chunks = [
+      new Uint8Array(50),
+      new Uint8Array(60), // Total 110 bytes > budget of 100 bytes
+      new Uint8Array(50)
+    ];
+    let chunkIdx = 0;
+
+    const mockFetch = async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map(), // No Content-Length
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (chunkIdx >= chunks.length) return { done: true, value: undefined };
+            return { done: false, value: chunks[chunkIdx++] };
+          },
+          cancel: async (reason) => {
+            readerCancelled = true;
+          }
+        })
+      }
+    });
+
+    await assert.rejects(
+      async () => {
+        await FbExtractor.fetchWithBudget("https://video.fbcdn.net/test.mp4", 100, mockFetch);
+      },
+      /vượt quá hạn mức bộ nhớ/
+    );
+
+    assert.equal(readerCancelled, true, "Reader must be cancelled on buffer overflow");
+  });
+
+  it("should successfully assemble chunks within budget", async () => {
+    const chunk1 = new Uint8Array([1, 2, 3]);
+    const chunk2 = new Uint8Array([4, 5]);
+    const chunks = [chunk1, chunk2];
+    let chunkIdx = 0;
+
+    const mockFetch = async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map([["content-length", "5"]]),
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (chunkIdx >= chunks.length) return { done: true, value: undefined };
+            return { done: false, value: chunks[chunkIdx++] };
+          },
+          cancel: async () => {}
+        })
+      }
+    });
+
+    const buffer = await FbExtractor.fetchWithBudget("https://video.fbcdn.net/test.mp4", 100, mockFetch);
+    const view = new Uint8Array(buffer);
+    assert.deepEqual(Array.from(view), [1, 2, 3, 4, 5]);
+  });
+
+  it("should handle non-streaming fallback with verified Content-Length and reject without Content-Length", async () => {
+    // 1. Success with verified Content-Length
+    const mockSuccess = async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map([["content-length", "4"]]),
+      body: null,
+      arrayBuffer: async () => new Uint8Array([10, 20, 30, 40]).buffer
+    });
+    const buf = await FbExtractor.fetchWithBudget("https://video.fbcdn.net/test.mp4", 100, mockSuccess);
+    assert.equal(buf.byteLength, 4);
+
+    // 2. Rejection when Content-Length is missing on non-streaming response
+    const mockMissingCl = async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      body: null,
+      arrayBuffer: async () => new Uint8Array([10, 20, 30, 40]).buffer
+    });
+    await assert.rejects(
+      async () => {
+        await FbExtractor.fetchWithBudget("https://video.fbcdn.net/test.mp4", 100, mockMissingCl);
+      },
+      /không hỗ trợ ReadableStream/
+    );
+  });
+});
+
 describe("Mp4Muxer (lib/mp4muxer.js)", () => {
   it("should merge video and audio MP4 buffers into a single dual-track MP4 and return explicit status", () => {
     const videoMp4 = createSampleMp4(1, false, [10, 20, 30, 40, 50]);
@@ -274,38 +393,42 @@ describe("BlobManager & MV3 Durability (lib/blob_manager.js)", () => {
     assert.equal(revokedUrls.includes(failedBlobUrl), true, "Failed download Blob URL must be immediately revoked");
   });
 
-  it("should keep Blob alive and not revoke when storage set fails after downloadId is returned", async () => {
+  it("should record downloadId on pending entry and clean up fully on downloads.onChanged when completePendingRegistration fails", async () => {
     const storage = createMockSessionStorage();
     const revokedUrls = [];
+    let offscreenClosed = false;
+
+    const mockSender = async (msg) => {
+      if (msg.action === "OFFSCREEN_REVOKE_URL") revokedUrls.push(msg.blobUrl);
+    };
+    const mockCloser = async () => {
+      offscreenClosed = true;
+    };
 
     const targetUrl = "blob:chrome-extension://mock-id/safe-blob-download";
     const pendingToken = await BlobManager.beginPendingRegistration(targetUrl, storage);
+    const downloadId = 888;
 
-    // Simulate Chrome returning valid downloadId 777
-    const downloadId = 777;
+    // Simulate completePendingRegistration storage failure
+    await BlobManager.recordPendingDownloadId(pendingToken, downloadId, storage);
 
-    // Simulate storage set failure during completePendingRegistration
-    const brokenSetStorage = {
-      ...storage,
-      set: (obj, cb) => {
-        globalThis.chrome = { runtime: { lastError: { message: "QuotaExceededError" } } };
-        cb();
-        delete globalThis.chrome;
-      }
-    };
+    // Verify pending entry has downloadId recorded and offscreen stays open
+    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), true);
 
-    let completeError = null;
-    try {
-      await BlobManager.completePendingRegistration(pendingToken, downloadId, targetUrl, brokenSetStorage);
-    } catch (e) {
-      completeError = e;
-    }
+    // Later, chrome.downloads.onChanged fires with downloadId 888
+    const unregisteredUrl = await BlobManager.unregisterBlobDownload(downloadId, storage);
+    assert.equal(unregisteredUrl, targetUrl, "Must reconcile downloadId from pending entry");
 
-    assert.ok(completeError, "Should catch storage set failure");
+    // Revoke Blob URL
+    await BlobManager.revokeBlobUrl(unregisteredUrl, {
+      messageSender: mockSender,
+      offscreenCloser: mockCloser,
+      storageApi: storage
+    });
 
-    // Background.js catch block does not revoke Blob or cancel pending token
-    assert.equal(revokedUrls.length, 0, "Blob URL must NOT be revoked when downloadId has already started");
-    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), true, "Pending entry keeps offscreen alive");
+    assert.equal(revokedUrls.includes(targetUrl), true, "Blob URL must be revoked on completion");
+    assert.equal(await BlobManager.hasActiveBlobDownloads(storage), false, "All pending and active records must be cleared");
+    assert.equal(offscreenClosed, true, "Offscreen document must close cleanly");
   });
 
   it("should serialize concurrent registerBlobDownload calls without dropping entries", async () => {
@@ -418,17 +541,6 @@ describe("Offscreen Architecture & MV3 Pipeline Integration", () => {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
     assert.ok(manifest.permissions.includes("offscreen"), "manifest.json must have 'offscreen' permission");
     assert.ok(manifest.permissions.includes("storage"), "manifest.json must have 'storage' permission");
-  });
-
-  it("should enforce combined memory budget and reject oversized Content-Length headers", () => {
-    const MAX_TOTAL_MEDIA_BUDGET = 250 * 1024 * 1024;
-    const oversizedVideoBytes = 300 * 1024 * 1024;
-    assert.ok(oversizedVideoBytes > MAX_TOTAL_MEDIA_BUDGET, "Oversized video must exceed budget");
-
-    const videoBytes = 200 * 1024 * 1024;
-    const audioBytes = 60 * 1024 * 1024;
-    const remaining = MAX_TOTAL_MEDIA_BUDGET - videoBytes;
-    assert.ok(audioBytes > remaining, "Combined video + audio must exceed remaining budget and be rejected");
   });
 
   it("should validate full pipeline: DASH separate -> mux -> internal blob URL download -> revocation registration", () => {

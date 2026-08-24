@@ -979,9 +979,8 @@ async function downloadMedia({ url, isInternalBlob = false, type = "video", titl
             try {
               await BlobManager.completePendingRegistration(pendingToken, downloadId, targetUrl);
             } catch (storageErr) {
-              console.warn("[Bin.Late FB Downloader] Failed to persist active registration; keeping blob alive:", storageErr.message);
-              // Do NOT cancel or revoke the Blob URL because Chrome has already started downloading downloadId!
-              // The pending token remains in session storage as an active resource, keeping offscreen open safely.
+              console.warn("[Bin.Late FB Downloader] Failed to persist active registration; recording downloadId on pending:", storageErr.message);
+              await BlobManager.recordPendingDownloadId(pendingToken, downloadId);
             }
           }
           resolve(downloadId);
@@ -990,3 +989,21 @@ async function downloadMedia({ url, isInternalBlob = false, type = "video", titl
     );
   });
 }
+
+// Track download completion to automatically revoke Blob URLs and close offscreen document
+if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onChanged) {
+  chrome.downloads.onChanged.addListener(async (delta) => {
+    if (!delta || !delta.id) return;
+    const downloadId = delta.id;
+    const isComplete = delta.state && delta.state.current === "complete";
+    const isInterrupted = delta.error && delta.error.current;
+
+    if (isComplete || isInterrupted) {
+      const blobUrl = await BlobManager.unregisterBlobDownload(downloadId);
+      if (blobUrl) {
+        await BlobManager.revokeBlobUrl(blobUrl);
+      }
+    }
+  });
+}
+

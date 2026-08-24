@@ -47,6 +47,12 @@ async function fetchWithBudget(url, maxBytesAllowed) {
   }
 
   if (!res.body || typeof res.body.getReader !== "function") {
+    const cl = clHeader ? parseInt(clHeader, 10) : NaN;
+    if (isNaN(cl) || cl > maxBytesAllowed) {
+      throw new Error(
+        "Môi trường không hỗ trợ ReadableStream và dung lượng dữ liệu không xác định trước hoặc vượt hạn mức cho phép."
+      );
+    }
     const buf = await res.arrayBuffer();
     if (buf.byteLength > maxBytesAllowed) {
       throw new Error(
