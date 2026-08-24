@@ -155,24 +155,11 @@
           }
         }
 
-        // 3. Global / page-level manifest fallback
-        const globalStreams = Extractor.extractStreamsFromText(text);
-        if (globalStreams) {
-          if (!urlsMap.has("fallback_any")) {
-            urlsMap.set("fallback_any", globalStreams);
-          }
-          // Associate with current URL if on Reel or Video page
-          const reelMatch = window.location.pathname.match(/\/reel(?:s)?\/([a-zA-Z0-9_-]+)/);
-          if (reelMatch && !urlsMap.has(reelMatch[1])) {
-            urlsMap.set(reelMatch[1], globalStreams);
-          }
-          const videoMatch = window.location.pathname.match(/\/videos\/(\d+)/);
-          if (videoMatch && !urlsMap.has(videoMatch[1])) {
-            urlsMap.set(videoMatch[1], globalStreams);
-          }
-        }
       }
     }
+
+    // Removed fallback_any mechanism - it caused cross-Reel contamination
+    // Each video must have exact videoId match to get its stream
 
     return urlsMap;
   }
@@ -199,6 +186,7 @@
    * Extract video ID from URL or DOM element
    */
   function extractVideoId(url, element) {
+    // Priority 1: Direct URL patterns
     if (url) {
       const reelMatch = url.match(/\/(?:reel|reels|share\/r)\/([a-zA-Z0-9_-]+)/i);
       if (reelMatch) return reelMatch[1];
@@ -209,22 +197,32 @@
       const videoMatch = url.match(/\/videos\/(?:[^/]+\/)?(\d+)/);
       if (videoMatch) return videoMatch[1];
     }
+    
+    // Priority 2: Element's own data attributes (most accurate for Reels)
     if (element) {
-      const postContainer = element.closest('[data-video-id], [data-store*="video_id"]');
+      // Check video element directly for data attributes
+      const videoReelId = element.getAttribute("data-reel-id") || element.getAttribute("data-video-id");
+      if (videoReelId) return videoReelId;
+      
+      // Check parent containers
+      const postContainer = element.closest('[data-video-id], [data-reel-id], [data-store*="video_id"]');
       if (postContainer) {
-        const directId = postContainer.getAttribute("data-video-id");
+        const directId = postContainer.getAttribute("data-video-id") || postContainer.getAttribute("data-reel-id");
         if (directId) return directId;
         const dataStore = postContainer.getAttribute("data-store");
-        const match = dataStore?.match(/"video_id":\s*"?(\d+)"?/);
+        const match = dataStore?.match(/"(?:video_id|reel_id)":\s*"?(\d+)"?/);
         if (match) return match[1];
       }
     }
+    
+    // Priority 3: URL pathname (current page)
     const pathReel = window.location.pathname.match(/\/(?:reel|reels|share\/r)\/([a-zA-Z0-9_-]+)/i);
     if (pathReel) return pathReel[1];
     const pathVideo = window.location.pathname.match(/\/videos\/(\d+)/);
     if (pathVideo) return pathVideo[1];
 
-    return null;
+    // Priority 4: Fallback to element ID or generated ID
+    return element?.id || `vid_${Math.random().toString(36).substr(2, 9)}`;
   }
 
   /**
@@ -259,6 +257,9 @@
     const isReel = isReelContext(video);
     const videoType = isReel ? "reel" : "video";
     const videoId = extractVideoId(postLink, video) || video.id || `vid_${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Set data-reel-id on video element for later correlation
+    video.setAttribute("data-reel-id", videoId);
 
     return {
       element: video,
@@ -374,9 +375,9 @@
     let streamMatch = null;
     if (videoInfo.videoId && scriptUrls.has(videoInfo.videoId)) {
       streamMatch = scriptUrls.get(videoInfo.videoId);
-    } else if (scriptUrls.has("fallback_any")) {
-      streamMatch = scriptUrls.get("fallback_any");
     }
+    // REMOVED: fallback_any - it caused cross-Reel contamination
+    // Only exact videoId match is allowed
 
     if (streamMatch) {
       if (quality === "HD" && streamMatch.hdUrl) {
@@ -485,10 +486,6 @@
 
       if (info.videoId && scriptData.has(info.videoId)) {
         const entry = scriptData.get(info.videoId);
-        matchedHd = entry.hdUrl;
-        matchedSd = entry.sdUrl;
-      } else if (scriptData.has("fallback_any")) {
-        const entry = scriptData.get("fallback_any");
         matchedHd = entry.hdUrl;
         matchedSd = entry.sdUrl;
       }

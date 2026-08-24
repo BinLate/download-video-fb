@@ -787,26 +787,18 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       } else {
         resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
         resolvedAudioUrl = streamInfo.audioUrl || null;
-        resolvedDashSeparate = !!streamInfo.isDashSeparate;
+      resolvedDashSeparate = !!streamInfo.isDashSeparate;
       }
     }
   }
 
-  // 4. Fall back to streams captured during THIS extraction session
-  if (!resolvedUrl && captureSessionId !== null) {
-    const targetHint = lookupTarget || url || "";
-    resolvedUrl = pickBestCapturedStream(Number(tabId), targetHint, targetSource);
-  }
-
+  // 4. Validate we have a resolved URL
   try {
     if (!isValidMediaStream(resolvedUrl)) {
-      const captureHint = networkCaptureAvailable
-        ? ""
-        : " (Thu thập mạng không khả dụng: " + networkCaptureReason + ")";
       throw new Error(
         "Không tìm thấy luồng video trực tiếp cho liên kết này. " +
         "Hãy mở video/reel trên Facebook, phát video vài giây rồi thử lại " +
-        "(hoặc dùng nút 'Tải Reel' hiển thị ngay trên video)." + captureHint
+        "(hoặc dùng nút 'Tải Reel' hiển thị ngay trên video)."
       );
     }
 
