@@ -112,8 +112,21 @@
         }
       }
       return false;
+    },
+    isNumericFacebookId: function (id) {
+      return typeof id === "string" && /^\d{6,30}$/.test(id.trim());
     }
   };
+
+  /**
+   * Helper to check numeric Facebook video ID safely.
+   */
+  function isNumericFacebookId(id) {
+    if (typeof Extractor !== "undefined" && typeof Extractor.isNumericFacebookId === "function") {
+      return Extractor.isNumericFacebookId(id);
+    }
+    return typeof id === "string" && /^\d{6,30}$/.test(id.trim());
+  }
 
   /**
    * Helper to extract HD, SD, and Audio URLs from embedded scripts or DOM.

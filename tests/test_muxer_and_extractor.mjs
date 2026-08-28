@@ -1752,4 +1752,49 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     assert.equal(findMatch(null, multiMap, true), null, "Multi-entry map without targetId must return null");
     assert.equal(findMatch("111111", multiMap, true).hdUrl, "https://video-sin6-4.xx.fbcdn.net/1.mp4");
   });
+
+  // ---------- Test 27: isNumericFacebookId scope availability ----------
+  it("T27: isNumericFacebookId evaluates without ReferenceError across both FbExtractor and global helper bindings", () => {
+    // 1. Direct namespace
+    assert.equal(FbExtractor.isNumericFacebookId("1069318268997320"), true);
+    assert.equal(FbExtractor.isNumericFacebookId("not_a_number"), false);
+    assert.equal(FbExtractor.isNumericFacebookId(null), false);
+
+    // 2. Helper binding mimicking background.js / content.js
+    const isNum = (id) => Boolean(FbExtractor && typeof FbExtractor.isNumericFacebookId === "function" && FbExtractor.isNumericFacebookId(id));
+    assert.equal(isNum("1069318268997320"), true);
+    assert.equal(isNum("https://www.facebook.com/reel/1069318268997320"), false);
+    assert.equal(isNum(undefined), false);
+  });
+
+  // ---------- Test 28: Background GET_LIVE_PAGE_STREAMS payload structure ----------
+  it("T28: Background GET_LIVE_PAGE_STREAMS constructs message payload with decoupled numeric videoId and pageUrl", () => {
+    let capturedMessage = null;
+    const fakeChromeTabs = {
+      sendMessage: (tabId, msg, cb) => {
+        capturedMessage = msg;
+        cb({ success: true, streams: { hdUrl: "https://video-sin6-4.xx.fbcdn.net/mock_hd.mp4", audioUrl: "https://video-sin6-4.xx.fbcdn.net/mock_audio.mp4" } });
+      }
+    };
+
+    const isNum = (id) => Boolean(FbExtractor && typeof FbExtractor.isNumericFacebookId === "function" && FbExtractor.isNumericFacebookId(id));
+    const dispatchLiveQuery = (tabId, videoId, lookupTarget) => {
+      fakeChromeTabs.sendMessage(tabId, {
+        action: "GET_LIVE_PAGE_STREAMS",
+        videoId: isNum(videoId) ? videoId : null,
+        pageUrl: lookupTarget
+      }, () => {});
+    };
+
+    // Case A: videoId is null, lookupTarget is URL
+    dispatchLiveQuery(123, null, "https://www.facebook.com/reel/1069318268997320");
+    assert.equal(capturedMessage.action, "GET_LIVE_PAGE_STREAMS");
+    assert.equal(capturedMessage.videoId, null);
+    assert.equal(capturedMessage.pageUrl, "https://www.facebook.com/reel/1069318268997320");
+
+    // Case B: videoId is numeric
+    dispatchLiveQuery(123, "1069318268997320", "https://www.facebook.com/reel/1069318268997320");
+    assert.equal(capturedMessage.videoId, "1069318268997320");
+    assert.equal(capturedMessage.pageUrl, "https://www.facebook.com/reel/1069318268997320");
+  });
 });

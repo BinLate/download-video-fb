@@ -17,7 +17,7 @@ try {
   }
 }
 
-const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.14";
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.15";
 console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
 
 const tabVideosMap = new Map();
@@ -333,6 +333,13 @@ function isFacebookMediaHost(hostname) {
  */
 function isValidMediaStream(u) {
   return FbExtractor.isValidMediaStream(u);
+}
+
+/**
+ * Validate numeric Facebook video ID.
+ */
+function isNumericFacebookId(id) {
+  return Boolean(FbExtractor && typeof FbExtractor.isNumericFacebookId === "function" && FbExtractor.isNumericFacebookId(id));
 }
 
 /**
