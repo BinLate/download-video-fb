@@ -1611,4 +1611,38 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     const map = FbExtractor.extractUrlsFromScriptText(raw);
     assert.equal(map.has("777777777777"), false, "Parent video container must NOT receive streams from nested child without direct streams");
   });
+
+  // ---------- Test 21: Property order independence: __typename first ----------
+  it("T21: Property order independence (__typename first): child stream transferred to explicit Video parent", () => {
+    const raw = JSON.stringify({
+      __typename: "Video",
+      id: "123456789012",
+      playback_video: {
+        dash_manifest: `<MPD><Period><AdaptationSet contentType="video"><Representation mimeType="video/mp4" width="1080" height="1920" bandwidth="3000000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/order_first_hd.mp4?oe=111</BaseURL></Representation></AdaptationSet><AdaptationSet contentType="audio"><Representation mimeType="audio/mp4" bandwidth="128000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/order_first_audio.mp4?oe=111</BaseURL></Representation></AdaptationSet></Period></MPD>`
+      }
+    });
+    const map = FbExtractor.extractUrlsFromScriptText(raw);
+    assert.equal(map.has("123456789012"), true, "Must extract video ID when __typename is first");
+    const stream = map.get("123456789012");
+    assert.ok(stream.hdUrl.includes("order_first_hd.mp4"), "Must have HD URL");
+    assert.ok(stream.audioUrl.includes("order_first_audio.mp4"), "Must have Audio URL");
+    assert.equal(stream.isDashSeparate, true);
+  });
+
+  // ---------- Test 22: Property order independence: __typename last ----------
+  it("T22: Property order independence (__typename last): child stream transferred to explicit Video parent", () => {
+    const raw = JSON.stringify({
+      id: "888888888888",
+      playback_video: {
+        dash_manifest: `<MPD><Period><AdaptationSet contentType="video"><Representation mimeType="video/mp4" width="1080" height="1920" bandwidth="3000000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/order_last_hd.mp4?oe=222</BaseURL></Representation></AdaptationSet><AdaptationSet contentType="audio"><Representation mimeType="audio/mp4" bandwidth="128000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/order_last_audio.mp4?oe=222</BaseURL></Representation></AdaptationSet></Period></MPD>`
+      },
+      __typename: "Video"
+    });
+    const map = FbExtractor.extractUrlsFromScriptText(raw);
+    assert.equal(map.has("888888888888"), true, "Must extract video ID when __typename is last");
+    const stream = map.get("888888888888");
+    assert.ok(stream.hdUrl.includes("order_last_hd.mp4"), "Must have HD URL");
+    assert.ok(stream.audioUrl.includes("order_last_audio.mp4"), "Must have Audio URL");
+    assert.equal(stream.isDashSeparate, true);
+  });
 });

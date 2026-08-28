@@ -17,7 +17,7 @@ try {
   }
 }
 
-const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.10";
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.11";
 console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
 
 const tabVideosMap = new Map();
