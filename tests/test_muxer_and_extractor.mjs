@@ -88,6 +88,99 @@ function createSampleMp4(trackId, isAudio = false, sampleData = [1, 2, 3, 4]) {
   return total.buffer;
 }
 
+/**
+ * Build a synthetic fragmented MP4 (fMP4): ftyp + moov(mvhd+trak+mvex(trex)) + (moof+mdat)+.
+ * baseOffsetMode:
+ *   "moof"    -> tfhd uses default-base-is-moof flag (0x020000)
+ *   "explicit"-> tfhd carries an explicit absolute base_data_offset pointing at the mdat
+ */
+function createFragmentedMp4(trackId, fragmentPayloads, { baseOffsetMode = "moof" } = {}) {
+  const ftyp = createBox("ftyp", new Uint8Array([0x69, 0x73, 0x6f, 0x6d, 0, 0, 2, 0, 0x69, 0x73, 0x6f, 0x6d, 0x6d, 0x70, 0x34, 0x32]));
+
+  // mvhd v0 (108 bytes), next_track_ID at 104
+  const mvhd = new Uint8Array(108);
+  {
+    const v = new DataView(mvhd.buffer);
+    v.setUint32(0, 108, false);
+    mvhd.set([0x6d, 0x76, 0x68, 0x64], 4);
+    v.setUint32(20, 1000, false);
+    v.setUint32(104, trackId + 1, false);
+  }
+
+  // tkhd v0 (88 bytes): track_ID at offset 20
+  const tkhd = new Uint8Array(88);
+  {
+    const v = new DataView(tkhd.buffer);
+    v.setUint32(0, 88, false);
+    tkhd.set([0x74, 0x6b, 0x68, 0x64], 4);
+    v.setUint32(20, trackId, false);
+  }
+  const trak = createBox("trak", tkhd);
+
+  // trex content: ver/flags(4) + track_ID(4) + defaults(16)
+  const trexContent = new Uint8Array(24);
+  {
+    const v = new DataView(trexContent.buffer);
+    v.setUint32(4, trackId, false);
+    v.setUint32(8, 1, false);
+  }
+  const mvex = createBox("mvex", createBox("trex", trexContent));
+
+  const moov = createBox("moov", new Uint8Array([...createBox("mvhd", mvhd), ...trak, ...mvex]));
+
+  const hasBase = baseOffsetMode === "explicit";
+  const tfhdSize = hasBase ? 24 : 16; // 8 + ver/flags(4) + track(4) [+ base(8)]
+  const moofSize = 8 + 16 + (8 + tfhdSize + 16 + 20); // mfhd(16: ver/flags+seq) + traf(tfhd+tfdt+trun)
+
+  const parts = [ftyp, moov];
+  let cur = ftyp.length + moov.length;
+  fragmentPayloads.forEach((payload, i) => {
+    const moofStart = cur;
+    const mdatStart = moofStart + moofSize;
+
+    // mfhd FullBox content: ver/flags(4) + sequence_number(4)
+    const mfhdContent = new Uint8Array(8);
+    new DataView(mfhdContent.buffer).setUint32(4, i + 100, false); // distinctive sequence number
+
+    const tfhdContent = new Uint8Array(tfhdSize - 8);
+    {
+      const v = new DataView(tfhdContent.buffer);
+      v.setUint32(0, hasBase ? 0x00000001 : 0x00200000, false); // flags: explicit-base | default-base-is-moof
+      v.setUint32(4, trackId, false);
+      if (hasBase) {
+        // 64-bit base_data_offset: high word then low word (values < 4GB -> high = 0)
+        v.setUint32(8, 0, false);
+        v.setUint32(12, mdatStart, false);
+      }
+    }
+
+    const tfdtContent = new Uint8Array(8);
+    new DataView(tfdtContent.buffer).setUint32(4, i * 1000, false);
+
+    const trunContent = new Uint8Array(12);
+    {
+      const v = new DataView(trunContent.buffer);
+      v.setUint32(0, 0x00000001, false); // flags: data-offset present
+      v.setUint32(4, 1, false); // one sample
+      v.setUint32(8, hasBase ? 0 : moofSize + 8, false); // data_offset relative to base
+    }
+
+    const traf = createBox("traf", new Uint8Array([...createBox("tfhd", tfhdContent), ...createBox("tfdt", tfdtContent), ...createBox("trun", trunContent)]));
+    const moof = createBox("moof", new Uint8Array([...createBox("mfhd", mfhdContent), ...traf]));
+    const mdat = createBox("mdat", new Uint8Array(payload));
+    parts.push(moof, mdat);
+    cur += moofSize + mdat.length;
+  });
+
+  const total = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
+  let off = 0;
+  for (const p of parts) {
+    total.set(p, off);
+    off += p.length;
+  }
+  return total.buffer;
+}
+
 describe("FbExtractor (lib/extractor.js)", () => {
   it("should parse DASH MPD XML with separate video and audio representations", () => {
     const res = FbExtractor.parseDashManifest(SAMPLE_DASH_XML);
@@ -124,6 +217,16 @@ describe("FbExtractor (lib/extractor.js)", () => {
     assert.ok(res.hdUrl.includes("progressive_hd.mp4"));
     assert.equal(res.isProgressive, true);
     assert.equal(res.audioUrl, null, "Progressive MP4 already contains audio");
+  });
+
+  it("should parse dash_manifest payloads containing escaped quotes and extract audio", () => {
+    // Runtime payload contains \" and \/ escape sequences exactly like Facebook's dash_manifest JSON value.
+    const manifest = String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"720\" height=\"1280\" bandwidth=\"800000\" codecs=\"avc1\" FBQualityLabel=\"720p\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/video.mp4?oe=123<\/BaseURL><\/Representation><\/AdaptationSet><AdaptationSet contentType=\"audio\"><Representation id=\"a1\" mimeType=\"audio/mp4\" bandwidth=\"64000\" codecs=\"mp4a.40.2\" FBQualityLabel=\"AUDIO\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/a\/audio.mp4?oe=123<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`;
+    const text = '"video_id":"1234567890","dash_manifest":"' + manifest + '"';
+    const res = FbExtractor.extractStreamsFromText(text);
+    assert.ok(res, "Streams must be extracted from escaped dash_manifest");
+    assert.equal(res.isDashSeparate, true, "Escaped dash_manifest must yield separate A/V streams");
+    assert.ok(res.audioUrl && res.audioUrl.includes("audio.mp4"), "Audio URL must survive escaped-quote parsing");
   });
 
   it("should validate Facebook CDN media hostnames and block unauthorized domains", () => {
@@ -320,6 +423,89 @@ describe("Mp4Muxer (lib/mp4muxer.js)", () => {
     const res = Mp4Muxer.mergeMp4Buffers(fmp4.buffer, normalAudio);
     assert.equal(res.muxed, false, "Must not claim fragmented MP4 as muxed");
     assert.equal(res.reason, "fragmented_mp4_not_supported");
+  });
+
+  it("should merge two fragmented MP4 (fMP4) streams into a dual-track fMP4", () => {
+    const video = createFragmentedMp4(1, [[1, 2, 3, 4, 5], [6, 7]], { baseOffsetMode: "moof" });
+    const audio = createFragmentedMp4(1, [[10, 11, 12]], { baseOffsetMode: "moof" });
+
+    const res = Mp4Muxer.mergeMp4Buffers(video, audio);
+    assert.equal(res.muxed, true, "fMP4 + fMP4 must be merged");
+    assert.equal(res.format, "fragmented");
+    assert.equal(res.tracks, 2, "Must contain 2 tracks");
+
+    const merged = res.buffer;
+    const top = Mp4Muxer.findBoxes(merged);
+    const moov = top.find((b) => b.type === "moov");
+    const moofs = top.filter((b) => b.type === "moof");
+    assert.ok(moov, "merged fMP4 must contain moov");
+    assert.equal(moofs.length, 3, "video 2 fragments + audio 1 fragment");
+
+    // traks: 2, with unique ids 1 and 2
+    const traks = Mp4Muxer.findBoxesRecursively(merged, "trak", moov.start, moov.end);
+    assert.equal(traks.length, 2);
+    const tkhdIds = traks.map((tr) => {
+      const tk = Mp4Muxer.findBoxByType(merged, "tkhd", tr.start + tr.headerSize, tr.end);
+      return new DataView(merged, tk.start, tk.size).getUint32(20, false);
+    });
+    assert.deepEqual([...tkhdIds].sort(), [1, 2], "tkhd track IDs must be unique (video 1, audio 2)");
+
+    // mvex contains 2 trex with ids 1 and 2
+    const mvex = Mp4Muxer.findBoxByType(merged, "mvex", moov.start + moov.headerSize, moov.end);
+    assert.ok(mvex, "merged moov must contain mvex");
+    const trexes = Mp4Muxer.findBoxes(merged, mvex.start + mvex.headerSize, mvex.end).filter((b) => b.type === "trex");
+    assert.equal(trexes.length, 2);
+    const trexIds = trexes.map((t) => new DataView(merged, t.start, t.size).getUint32(12, false));
+    assert.deepEqual([...trexIds].sort(), [1, 2], "trex defaults must cover both tracks");
+
+    // audio fragment tfhd must reference track 2, mfhd renumbered sequentially
+    const audioMoof = moofs[2];
+    const audioChildren = Mp4Muxer.findBoxes(merged, audioMoof.start + audioMoof.headerSize, audioMoof.end);
+    const audioTraf = audioChildren.find((b) => b.type === "traf");
+    const audioTfhd = Mp4Muxer.findBoxByType(merged, "tfhd", audioTraf.start + audioTraf.headerSize, audioTraf.end);
+    assert.equal(new DataView(merged, audioTfhd.start, audioTfhd.size).getUint32(12, false), 2, "audio fragment tfhd must reference track 2");
+    const audioMfhd = audioChildren.find((b) => b.type === "mfhd");
+    assert.equal(new DataView(merged, audioMfhd.start, audioMfhd.size).getUint32(12, false), 3, "sequence numbers must be renumbered 1..3");
+
+    // video fragment tfhd must keep track 1
+    const videoMoof = moofs[0];
+    const videoChildren = Mp4Muxer.findBoxes(merged, videoMoof.start + videoMoof.headerSize, videoMoof.end);
+    const videoTraf = videoChildren.find((b) => b.type === "traf");
+    const videoTfhd = Mp4Muxer.findBoxByType(merged, "tfhd", videoTraf.start + videoTraf.headerSize, videoTraf.end);
+    assert.equal(new DataView(merged, videoTfhd.start, videoTfhd.size).getUint32(12, false), 1, "video fragment tfhd must reference track 1");
+  });
+
+  it("should shift explicit base_data_offset when merging fMP4 fragments", () => {
+    const video = createFragmentedMp4(1, [[1, 2]], { baseOffsetMode: "explicit" });
+    const audio = createFragmentedMp4(1, [[3, 4]], { baseOffsetMode: "explicit" });
+
+    const res = Mp4Muxer.mergeMp4Buffers(video, audio);
+    assert.equal(res.muxed, true, "fMP4 with explicit base offsets must merge");
+
+    const merged = res.buffer;
+    const top = Mp4Muxer.findBoxes(merged);
+    const moofs = top.filter((b) => b.type === "moof");
+    const mdats = top.filter((b) => b.type === "mdat");
+    assert.equal(moofs.length, 2);
+    assert.equal(mdats.length, 2);
+
+    const audioMoof = moofs[1];
+    const audioChildren = Mp4Muxer.findBoxes(merged, audioMoof.start + audioMoof.headerSize, audioMoof.end);
+    const audioTraf = audioChildren.find((b) => b.type === "traf");
+    const audioTfhd = Mp4Muxer.findBoxByType(merged, "tfhd", audioTraf.start + audioTraf.headerSize, audioTraf.end);
+    const tfhdView = new DataView(merged, audioTfhd.start, audioTfhd.size);
+    const flags = tfhdView.getUint32(8, false) & 0x00ffffff;
+    assert.equal(flags & 0x000001, 0x000001, "audio tfhd must keep explicit base-data-offset flag");
+
+    const base = tfhdView.getUint32(20, false); // low 32 bits of the 64-bit base_data_offset
+    assert.equal(base, mdats[1].start, "audio fragment base_data_offset must point at its new mdat position");
+
+    const videoMoof = moofs[0];
+    const videoChildren = Mp4Muxer.findBoxes(merged, videoMoof.start + videoMoof.headerSize, videoMoof.end);
+    const videoTraf = videoChildren.find((b) => b.type === "traf");
+    const videoTfhd = Mp4Muxer.findBoxByType(merged, "tfhd", videoTraf.start + videoTraf.headerSize, videoTraf.end);
+    const videoBase = new DataView(merged, videoTfhd.start, videoTfhd.size).getUint32(20, false);
+    assert.equal(videoBase, mdats[0].start, "video fragment base_data_offset must point at its new mdat position");
   });
 
   it("should report missing moov or mdat box explicitly", () => {

@@ -306,7 +306,9 @@ function decodeFbEscapes(text) {
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"');
+    .replace(/&quot;/g, '"')
+    // Unescape JSON backslash sequences (\", \/, \\) so DASH XML attributes parse correctly.
+    .replace(/\\([\\"'/])/g, "$1");
 }
 
 /**
@@ -787,7 +789,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       } else {
         resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
         resolvedAudioUrl = streamInfo.audioUrl || null;
-      resolvedDashSeparate = !!streamInfo.isDashSeparate;
+        resolvedDashSeparate = !!streamInfo.isDashSeparate;
       }
     }
   }
@@ -803,7 +805,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
     }
 
     // 5. If this is a separate DASH stream (video + audio), mux them via offscreen!
-    if (resolvedUrl && resolvedAudioUrl && resolvedDashSeparate) {
+    if (resolvedUrl && resolvedAudioUrl) {
       if (!FbExtractor.isValidMediaStream(resolvedAudioUrl)) {
         throw new Error("Đường dẫn âm thanh không hợp lệ hoặc không thuộc máy chủ Facebook.");
       }
@@ -831,6 +833,25 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       if (!muxResponse || !muxResponse.success || !muxResponse.blobUrl) {
         throw new Error(
           `Ghép âm thanh và hình ảnh thất bại: ${muxResponse?.error || "Không thể tạo file MP4"}.`
+        );
+      }
+
+      // Fail loudly instead of silently delivering a video-only file.
+      if (muxResponse.isMuxed === false || muxResponse.hasAudio === false) {
+        const reasonMap = {
+          fragmented_mp4_not_supported: "một trong hai luồng là MP4 phân mảnh chưa được hỗ trợ",
+          mixed_fragmented_and_plain_mp4: "hai luồng không cùng định dạng MP4 phân mảnh",
+          missing_moov_or_mdat: "luồng âm thanh tải về không hợp lệ (URL có thể đã hết hạn)",
+          missing_movie_fragments: "luồng âm thanh không chứa dữ liệu phân đoạn",
+          missing_audio_buffer: "không tải được dữ liệu âm thanh",
+          missing_video_buffer: "không tải được dữ liệu video",
+          missing_video_trak: "luồng video thiếu thông tin track",
+          missing_audio_trak: "luồng âm thanh thiếu thông tin track"
+        };
+        const muxReason = reasonMap[muxResponse.reason] || ("lý do: " + (muxResponse.reason || "không xác định"));
+        throw new Error(
+          "Video và âm thanh KHÔNG ghép được (" + muxReason + "). " +
+          "Hãy phát video vài giây rồi thử tải lại."
         );
       }
 

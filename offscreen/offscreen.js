@@ -37,7 +37,7 @@ async function handleOffscreenMux(videoUrl, audioUrl) {
   if (!audioUrl) {
     const videoBlob = new Blob([videoBuffer], { type: "video/mp4" });
     const blobUrl = URL.createObjectURL(videoBlob);
-    return { success: true, blobUrl, isMuxed: false, hasAudio: false };
+    return { success: true, blobUrl, isMuxed: false, hasAudio: false, reason: "no_audio_url_provided" };
   }
 
   // 2. Stream-fetch audio with remaining combined budget
