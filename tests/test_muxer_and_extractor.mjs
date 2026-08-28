@@ -402,6 +402,79 @@ describe("FbExtractor (lib/extractor.js)", () => {
     assert.ok(!res1.hdUrl.includes("video2"), "Video 1 must not contain Video 2 URL");
     assert.ok(!res2.hdUrl.includes("video1"), "Video 2 must not contain Video 1 URL");
   });
+
+  it("should extract streams from nested script payloads where id is on outer object and stream is on inner object", () => {
+    const nestedScript = JSON.stringify({
+      id: "98765432101",
+      __typename: "Video",
+      video: {
+        dash_manifest: String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"1080\" height=\"1920\" bandwidth=\"3000000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/nested_hd.mp4?oe=333<\/BaseURL><\/Representation><\/AdaptationSet><AdaptationSet contentType=\"audio\"><Representation id=\"a1\" mimeType=\"audio/mp4\" bandwidth=\"128000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/a\/nested_audio.mp4?oe=333<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`
+      }
+    });
+
+    const map = FbExtractor.extractUrlsFromScriptText(nestedScript);
+    assert.ok(map.has("98765432101"), "Must extract outer ID 98765432101");
+    const stream = map.get("98765432101");
+    assert.ok(stream.hdUrl.includes("nested_hd.mp4"), "Must extract inner DASH video URL");
+    assert.ok(stream.audioUrl.includes("nested_audio.mp4"), "Must extract inner DASH audio URL");
+    assert.equal(stream.isDashSeparate, true);
+  });
+
+  it("should isolate multiple nested video objects within a single large script payload", () => {
+    const combinedScript = JSON.stringify({
+      feed_units: [
+        {
+          id: "post_comment_id_111",
+          author: { id: "user_id_222" },
+          story_video: {
+            id: "30000000001",
+            playback_video_dash_xml: String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"1080\" height=\"1920\" bandwidth=\"3000000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/feed_video1.mp4?oe=444<\/BaseURL><\/Representation><\/AdaptationSet><AdaptationSet contentType=\"audio\"><Representation id=\"a1\" mimeType=\"audio/mp4\" bandwidth=\"128000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/a\/feed_audio1.mp4?oe=444<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`
+          }
+        },
+        {
+          id: "post_comment_id_333",
+          author: { id: "user_id_444" },
+          story_video: {
+            id: "30000000002",
+            representations: [
+              {
+                id: "v2",
+                base_url: "https://video-sin6-4.xx.fbcdn.net/o1/v/feed_video2.mp4?oe=555",
+                mime_type: "video/mp4",
+                codecs: "avc1.64002a",
+                width: 720,
+                height: 1280,
+                bandwidth: 1500000
+              },
+              {
+                id: "a2",
+                base_url: "https://video-sin6-4.xx.fbcdn.net/o1/a/feed_audio2.mp4?oe=555",
+                mime_type: "audio/mp4",
+                codecs: "mp4a.40.2",
+                bandwidth: 96000
+              }
+            ]
+          }
+        }
+      ]
+    });
+
+    const map = FbExtractor.extractUrlsFromScriptText(combinedScript);
+    assert.ok(map.has("30000000001"), "Must extract video 1 ID");
+    assert.ok(map.has("30000000002"), "Must extract video 2 ID");
+
+    const v1 = map.get("30000000001");
+    const v2 = map.get("30000000002");
+
+    assert.ok(v1.hdUrl.includes("feed_video1.mp4"), "Video 1 must have feed_video1");
+    assert.ok(v1.audioUrl.includes("feed_audio1.mp4"), "Video 1 must have feed_audio1");
+
+    assert.ok(v2.sdUrl.includes("feed_video2.mp4") || v2.hdUrl.includes("feed_video2.mp4"), "Video 2 must have feed_video2");
+    assert.ok(v2.audioUrl.includes("feed_audio2.mp4"), "Video 2 must have feed_audio2");
+
+    // Ensure non-numeric or unrelated comment IDs were NOT mapped as video IDs
+    assert.equal(map.has("post_comment_id_111"), false, "Comment ID must not be mapped as video");
+  });
 });
 
 describe("Stream Budget & Memory Protection (fetchWithBudget)", () => {

@@ -101,7 +101,7 @@
 
   /**
    * Helper to extract HD, SD, and Audio URLs from embedded scripts or DOM.
-   * Parses JSON structures strictly within balanced object boundaries to prevent cross-video contamination.
+   * Leverages Extractor.extractUrlsFromScriptText to isolate video structures safely.
    */
   function extractUrlsFromScripts() {
     const urlsMap = new Map();
@@ -111,108 +111,13 @@
       const raw = script.textContent;
       if (!raw || raw.length < 30) continue;
 
-      const hasVideoKeys =
-        raw.includes("playable_url") ||
-        raw.includes("browser_native") ||
-        raw.includes("dash_manifest") ||
-        raw.includes("playback_video_dash_xml") ||
-        raw.includes("video_dash_manifest") ||
-        raw.includes("dash_prefetch_experimental") ||
-        raw.includes("playable_url_dash") ||
-        raw.includes("representations") ||
-        raw.includes("BaseURL") ||
-        raw.includes(".mp4") ||
-        raw.includes("audio_stream_url") ||
-        raw.includes("video_delivery");
-
-      if (!hasVideoKeys) continue;
-
-      const texts = [raw];
-      const decodedFull = Extractor.decodeFbEscapes(raw);
-      if (decodedFull !== raw) texts.push(decodedFull);
-
-      for (const text of texts) {
-        // 1. Direct JSON object pattern: {"id":"123...", ... "dash_manifest":...} or {"video_id":"123...", ...}
-        const streamKeywords = [
-          "dash_manifest",
-          "playback_video_dash_xml",
-          "video_dash_manifest",
-          "representations",
-          "playable_url_quality_hd",
-          "browser_native_hd_url",
-          "playable_url",
-          "browser_native_sd_url",
-          "playable_url_dash"
-        ];
-
-        for (const kw of streamKeywords) {
-          let kwIdx = 0;
-          while ((kwIdx = text.indexOf(`"${kw}"`, kwIdx)) !== -1) {
-            // Find enclosing balanced JSON block bounds around this keyword
-            const scanStart = Math.max(0, kwIdx - 3000);
-            const prefix = text.substring(scanStart, kwIdx);
-
-            // Find candidate opening braces before the keyword
-            const openBraces = [];
-            for (let i = 0; i < prefix.length; i++) {
-              if (prefix[i] === "{") openBraces.push(scanStart + i);
-            }
-
-            // Try matching from the closest opening braces outward
-            for (let b = openBraces.length - 1; b >= 0; b--) {
-              const startPos = openBraces[b];
-              let depth = 0;
-              let inString = false;
-              let escaped = false;
-              let endPos = -1;
-              const maxSearch = Math.min(text.length, startPos + 18000);
-
-              for (let i = startPos; i < maxSearch; i++) {
-                const char = text[i];
-                if (escaped) {
-                  escaped = false;
-                  continue;
-                }
-                if (char === "\\") {
-                  escaped = true;
-                  continue;
-                }
-                if (char === '"') {
-                  inString = !inString;
-                  continue;
-                }
-                if (!inString) {
-                  if (char === "{") depth++;
-                  else if (char === "}") {
-                    depth--;
-                    if (depth === 0) {
-                      endPos = i + 1;
-                      break;
-                    }
-                  }
-                }
-              }
-
-              if (endPos > kwIdx) {
-                const block = text.substring(startPos, endPos);
-                // Search for authoritative numeric videoId inside this balanced block
-                const idMatch = block.match(/"(?:video_id|id|videoId)"\s*:\s*"?(\d{6,30})"?/);
-                if (idMatch) {
-                  const videoId = idMatch[1];
-                  const streams = Extractor.extractStreamsFromText(block);
-                  if (streams && (streams.hdUrl || streams.sdUrl || streams.audioUrl)) {
-                    if (!urlsMap.has(videoId) || (streams.audioUrl && !urlsMap.get(videoId).audioUrl)) {
-                      urlsMap.set(videoId, streams);
-                    }
-                  }
-                }
-                break; // Found matching enclosing block
-              }
-            }
-
-            kwIdx += kw.length + 2;
+      const subMap = Extractor.extractUrlsFromScriptText(raw);
+      if (subMap && typeof subMap.forEach === "function") {
+        subMap.forEach((streams, videoId) => {
+          if (!urlsMap.has(videoId) || (streams.audioUrl && !urlsMap.get(videoId).audioUrl)) {
+            urlsMap.set(videoId, streams);
           }
-        }
+        });
       }
     }
 
