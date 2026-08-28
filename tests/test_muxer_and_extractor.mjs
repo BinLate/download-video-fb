@@ -1531,4 +1531,69 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     assert.equal(result.isDash, true, "isDash is true");
     assert.equal(result.isProgressive, false, "isProgressive is false (needs muxing)");
   });
+
+  // ---------- Test 17: Parent video URL + nested child's audio URL must NOT pair ----------
+  it("T17: Parent video URL must not consume nested child's audio URL", () => {
+    const raw = JSON.stringify({
+      id: "111111111111",
+      browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/parent_video.mp4?oe=1",
+      related_media: {
+        id: "222222222222",
+        audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/child_audio.mp4?oe=2"
+      }
+    });
+    const map = FbExtractor.extractUrlsFromScriptText(raw);
+    assert.equal(map.has("111111111111"), true, "Parent video should be extracted");
+    const parentStream = map.get("111111111111");
+    assert.ok(parentStream.hdUrl.includes("parent_video.mp4"), "Parent has its video URL");
+    assert.equal(parentStream.audioUrl, null, "Parent must NOT consume child's audio URL");
+    assert.equal(parentStream.isProgressive, true, "Parent video remains progressive when child has audio");
+  });
+
+  // ---------- Test 18: Nested video object with its own video+audio gets its own pair ----------
+  it("T18: Nested video object with video+audio pairs correctly and is not stolen by parent", () => {
+    const raw = JSON.stringify({
+      id: "333333333333",
+      browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/outer_video.mp4?oe=3",
+      nested_video: {
+        id: "444444444444",
+        browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/inner_video.mp4?oe=4",
+        audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/inner_audio.mp4?oe=5"
+      }
+    });
+    const map = FbExtractor.extractUrlsFromScriptText(raw);
+    assert.equal(map.has("444444444444"), true, "Nested video node should be extracted");
+    const childStream = map.get("444444444444");
+    assert.ok(childStream.hdUrl.includes("inner_video.mp4"), "Child has its own video");
+    assert.ok(childStream.audioUrl.includes("inner_audio.mp4"), "Child pairs its own audio");
+    assert.equal(childStream.isDashSeparate, true, "Child is DASH separate");
+
+    const parentStream = map.get("333333333333");
+    assert.ok(parentStream.hdUrl.includes("outer_video.mp4"), "Parent has its own video");
+    assert.equal(parentStream.audioUrl, null, "Parent does NOT steal child's audio");
+  });
+
+  // ---------- Test 19: Two sibling media objects do not cross-pair ----------
+  it("T19: Sibling media objects do not cross-pair streams", () => {
+    const raw = JSON.stringify({
+      feed: [
+        {
+          id: "555555555555",
+          browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/sibling1_video.mp4?oe=6",
+          audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/sibling1_audio.mp4?oe=7"
+        },
+        {
+          id: "666666666666",
+          browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/sibling2_video.mp4?oe=8"
+        }
+      ]
+    });
+    const map = FbExtractor.extractUrlsFromScriptText(raw);
+    assert.equal(map.has("555555555555"), true);
+    assert.equal(map.has("666666666666"), true);
+    const s1 = map.get("555555555555");
+    const s2 = map.get("666666666666");
+    assert.ok(s1.audioUrl.includes("sibling1_audio.mp4"), "Sibling 1 has its own audio");
+    assert.equal(s2.audioUrl, null, "Sibling 2 must NOT receive Sibling 1's audio");
+  });
 });
