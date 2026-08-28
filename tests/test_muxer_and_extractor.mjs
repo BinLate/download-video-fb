@@ -339,6 +339,30 @@ describe("FbExtractor (lib/extractor.js)", () => {
     assert.ok(res.audioUrl.includes("reel_audio.mp4"));
   });
 
+  it("should merge GraphQL audio representation when DASH manifest contains only video", () => {
+    const videoOnlyDash = String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v_dash\" mimeType=\"video/mp4\" width=\"1080\" height=\"1920\" bandwidth=\"3000000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/dash_video.mp4?oe=789<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`;
+    const rawPayload = JSON.stringify({
+      video_id: "112233445566",
+      dash_manifest: videoOnlyDash,
+      representations: [
+        {
+          id: "audio_rep",
+          base_url: "https://video-sin6-4.xx.fbcdn.net/o1/a/graphql_audio.mp4?oe=789",
+          mime_type: "audio/mp4",
+          codecs: "mp4a.40.2",
+          bandwidth: 128000,
+          quality_label: "AUDIO"
+        }
+      ]
+    });
+
+    const res = FbExtractor.extractStreamsFromText(rawPayload);
+    assert.ok(res, "Result must be extracted");
+    assert.equal(res.isDashSeparate, true, "Must be DASH separate with merged audio");
+    assert.ok(res.hdUrl.includes("dash_video.mp4"), "DASH video URL must be preserved");
+    assert.ok(res.audioUrl.includes("graphql_audio.mp4"), "GraphQL audio URL must be merged");
+  });
+
   it("should validate Facebook CDN media hostnames and block unauthorized domains", () => {
     assert.equal(FbExtractor.isValidMediaStream("https://video-sin6-4.xx.fbcdn.net/o1/v/file.mp4"), true);
     assert.equal(FbExtractor.isValidMediaStream("https://scontent.xx.fbsbx.com/v/t1/file.mp4"), true);
