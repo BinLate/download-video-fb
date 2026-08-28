@@ -493,6 +493,31 @@ describe("FbExtractor (lib/extractor.js)", () => {
     assert.ok(stream.hdUrl.includes("large_gap_hd.mp4"));
     assert.ok(stream.audioUrl.includes("large_gap_audio.mp4"));
   });
+
+  it("should perform linear single-pass parsing efficiently under large multi-video payload stress test", () => {
+    const items = [];
+    for (let i = 1; i <= 50; i++) {
+      items.push({
+        id: `post_comment_${i}`,
+        author: { id: `author_${i}` },
+        video: {
+          id: `50000000000${i}`,
+          dash_manifest: String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"1080\" height=\"1920\" bandwidth=\"3000000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/stress_${i}.mp4?oe=888<\/BaseURL><\/Representation><\/AdaptationSet><AdaptationSet contentType=\"audio\"><Representation id=\"a1\" mimeType=\"audio/mp4\" bandwidth=\"128000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/a\/audio_${i}.mp4?oe=888<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`
+        },
+        padding: "p".repeat(2000)
+      });
+    }
+
+    const largeScript = JSON.stringify({ feed_stream: items });
+    const startTime = Date.now();
+    const map = FbExtractor.extractUrlsFromScriptText(largeScript);
+    const duration = Date.now() - startTime;
+
+    assert.equal(map.size, 50, "Must extract all 50 distinct video IDs");
+    assert.ok(duration < 100, `Parsing 50 videos in 100KB payload must complete in <100ms (took ${duration}ms)`);
+    assert.ok(map.get("500000000001").hdUrl.includes("stress_1.mp4"));
+    assert.ok(map.get("5000000000050").hdUrl.includes("stress_50.mp4"));
+  });
 });
 
 describe("Stream Budget & Memory Protection (fetchWithBudget)", () => {
