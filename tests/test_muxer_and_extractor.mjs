@@ -582,6 +582,22 @@ describe("FbExtractor (lib/extractor.js)", () => {
     const map = FbExtractor.extractUrlsFromScriptText(containerWithChildStreamNoId);
     assert.equal(map.has("1111222233334444"), false, "Container ID must NOT receive stream from anonymous child video node");
   });
+
+  it("should not map numeric generic node ID when nested descendant video lacks its own ID", () => {
+    const genericNodeWithDescendantStream = JSON.stringify({
+      node: {
+        id: "1111222233334444",
+        attachments: {
+          story_video: {
+            dash_manifest: String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"1080\" height=\"1920\" bandwidth=\"3000000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/descendant_video.mp4?oe=222<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`
+          }
+        }
+      }
+    });
+
+    const map = FbExtractor.extractUrlsFromScriptText(genericNodeWithDescendantStream);
+    assert.equal(map.has("1111222233334444"), false, "Generic node ID must NOT receive stream from anonymous descendant story_video");
+  });
 });
 
 describe("Stream Budget & Memory Protection (fetchWithBudget)", () => {
