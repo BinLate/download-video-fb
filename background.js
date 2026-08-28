@@ -3,9 +3,21 @@
  * Author: Bin.Late
  */
 
-importScripts("lib/extractor.js", "lib/mp4muxer.js", "lib/blob_manager.js");
+try {
+  importScripts("./lib/extractor.js", "./lib/mp4muxer.js", "./lib/blob_manager.js");
+} catch (e1) {
+  try {
+    importScripts("/lib/extractor.js", "/lib/mp4muxer.js", "/lib/blob_manager.js");
+  } catch (e2) {
+    try {
+      importScripts("lib/extractor.js", "lib/mp4muxer.js", "lib/blob_manager.js");
+    } catch (e3) {
+      console.error("[Download Video FB] Fatal: importScripts failed:", e3);
+    }
+  }
+}
 
-const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.1";
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.5";
 console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
 
 const tabVideosMap = new Map();
@@ -644,6 +656,14 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       if (streamInfo.audioUrl) {
         resolvedAudioUrl = streamInfo.audioUrl;
         resolvedDashSeparate = true;
+        // Pair video stream from the same manifest
+        if (quality === "HD" && streamInfo.hdUrl) {
+          resolvedUrl = streamInfo.hdUrl;
+        } else if (streamInfo.sdUrl) {
+          resolvedUrl = streamInfo.sdUrl;
+        } else if (streamInfo.hdUrl) {
+          resolvedUrl = streamInfo.hdUrl;
+        }
       }
       if (streamInfo.isDash) resolvedIsDash = true;
       // Always capture progressive fallback URLs from SSR

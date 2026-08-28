@@ -354,9 +354,14 @@
     let streamMatch = null;
     if (authoritativeVideoId && scriptUrls.has(authoritativeVideoId)) {
       streamMatch = scriptUrls.get(authoritativeVideoId);
+    } else if (
+      !streamMatch &&
+      scriptUrls.size === 1 &&
+      (window.location.pathname.includes("/reel/") || window.location.pathname.includes("/watch") || window.location.pathname.includes("/share/r/"))
+    ) {
+      // Dedicated single-video page: safe to use the single parsed stream configuration
+      streamMatch = scriptUrls.values().next().value;
     }
-    // REMOVED: fallback_any - it caused cross-Reel contamination
-    // Only exact videoId match is allowed
 
     let isProgressive = false;
     let isDash = false;

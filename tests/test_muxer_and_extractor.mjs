@@ -1479,4 +1479,20 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     assert.equal(r2.isDash, false, "Generic: isDash should be false");
     assert.equal(r2.isProgressive, true, "Generic: isProgressive should be true");
   });
+
+  // ---------- Test 14: Direct id matching on stream-bearing JSON object ----------
+  it("T14: extractUrlsFromScriptText extracts video and audio when id and dash_manifest are directly on the object", () => {
+    const raw = JSON.stringify({
+      short_form_video_context: {
+        id: "998877665544",
+        dash_manifest: `<MPD><Period><AdaptationSet contentType="video"><Representation mimeType="video/mp4" width="1080" height="1920" bandwidth="4000000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/v_direct.mp4?oe=X</BaseURL></Representation></AdaptationSet><AdaptationSet contentType="audio"><Representation mimeType="audio/mp4" bandwidth="128000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/a_direct.mp4?oe=Y</BaseURL></Representation></AdaptationSet></Period></MPD>`
+      }
+    });
+    const map = FbExtractor.extractUrlsFromScriptText(raw);
+    assert.equal(map.has("998877665544"), true, "Should extract object with direct ID and manifest");
+    const stream = map.get("998877665544");
+    assert.ok(stream.hdUrl.includes("v_direct.mp4"), "HD URL matches");
+    assert.ok(stream.audioUrl.includes("a_direct.mp4"), "Audio URL matches");
+    assert.equal(stream.isDashSeparate, true, "Is DASH separate");
+  });
 });
