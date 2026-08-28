@@ -709,32 +709,42 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
     }
 
     // ========================================================================
-    // TIER 3: Download whatever we have — but BLOCK silent video-only downloads
+    // TIER 3: Download whatever we have — but BLOCK confirmed silent DASH streams
     // ========================================================================
-    if (resolvedProgressive) {
-      // Progressive MP4 — already has audio embedded, safe to download
-      diag.fallbackUsed = "progressive_original";
-      diag.hasAudioTrack = true;
-      console.log(`[Download Video FB] v${EXT_VERSION} Tier 3: Progressive download (has embedded audio)`);
+    // Stream classification:
+    //   resolvedProgressive === true  → known progressive (has embedded audio)
+    //   resolvedDashSeparate === true → known DASH (video-only, needs separate audio)
+    //   both false                    → unknown origin (e.g. context menu, direct URL)
+    //
+    // Only block when we KNOW the stream is DASH video-only and has no audio.
+    // Unknown-origin streams (from context menus, direct URLs) are allowed
+    // because they are likely progressive MP4s with embedded audio.
+    const isConfirmedDashVideoOnly = resolvedDashSeparate && !resolvedProgressive;
+
+    if (isConfirmedDashVideoOnly) {
+      // Confirmed DASH video-only stream with no audio and no progressive fallback
+      // — refuse to silently deliver a mute file to the user.
+      diag.fallbackUsed = "blocked_video_only";
+      diag.hasAudioTrack = false;
+      console.error(`[Download Video FB] v${EXT_VERSION} Tier 3 BLOCKED: Confirmed DASH video-only stream with no audio and no progressive fallback.`);
       console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
-      return await downloadMedia({
-        url: resolvedUrl,
-        isInternalBlob: false,
-        type, title, quality
-      });
+      throw new Error(
+        "Không thể tải video có âm thanh. Video này sử dụng luồng DASH riêng biệt " +
+        "nhưng không tìm được luồng âm thanh hoặc phiên bản MP4 đầy đủ. " +
+        "Hãy phát video vài giây rồi thử tải lại."
+      );
     }
 
-    // DASH video-only stream with no audio and no progressive fallback
-    // — refuse to silently deliver a mute file to the user.
-    diag.fallbackUsed = "blocked_video_only";
-    diag.hasAudioTrack = false;
-    console.error(`[Download Video FB] v${EXT_VERSION} Tier 3 BLOCKED: Video-only DASH stream with no audio and no progressive fallback.`);
+    // Progressive or unknown-origin stream — download (likely has embedded audio)
+    diag.fallbackUsed = resolvedProgressive ? "progressive_original" : "unknown_origin_download";
+    diag.hasAudioTrack = true; // Assume embedded audio for progressive/unknown
+    console.log(`[Download Video FB] v${EXT_VERSION} Tier 3: ${resolvedProgressive ? "Progressive" : "Unknown-origin"} download (assuming embedded audio)`);
     console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
-    throw new Error(
-      "Không thể tải video có âm thanh. Video này sử dụng luồng DASH riêng biệt " +
-      "nhưng không tìm được luồng âm thanh hoặc phiên bản MP4 đầy đủ. " +
-      "Hãy phát video vài giây rồi thử tải lại."
-    );
+    return await downloadMedia({
+      url: resolvedUrl,
+      isInternalBlob: false,
+      type, title, quality
+    });
   } finally {
     if (captureSessionId !== null) disarmCaptureSession(tabId, captureSessionId);
   }
