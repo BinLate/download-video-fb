@@ -1505,8 +1505,10 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     assert.equal(FbExtractor.isDedicatedSingleVideoPage("/videos/123456789012/", ""), true);
     assert.equal(FbExtractor.isDedicatedSingleVideoPage("/watch/", "?v=123456789012"), true);
     assert.equal(FbExtractor.isDedicatedSingleVideoPage("/watch", "?ref=search&v=123456789012"), true);
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/watch", "?v=123456789012&ref=foo"), true);
 
-    // False cases (Generic Multi-Video Feeds)
+    // False cases (Generic Multi-Video Feeds / Malformed IDs)
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/watch", "?v=123456789abc"), false, "Malformed non-numeric ?v= must be false");
     assert.equal(FbExtractor.isDedicatedSingleVideoPage("/watch", ""), false, "Generic /watch without ?v= must be false");
     assert.equal(FbExtractor.isDedicatedSingleVideoPage("/watch/", ""), false, "Generic /watch/ without ?v= must be false");
     assert.equal(FbExtractor.isDedicatedSingleVideoPage("/reels", ""), false, "Generic /reels feed must be false");

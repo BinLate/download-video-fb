@@ -101,7 +101,16 @@
       if (/^\/(?:reel|reels)\/\d{6,30}\/?$/i.test(path || "")) return true;
       if (/^\/share\/r\/[^/]+\/?$/i.test(path || "")) return true;
       if (/^\/videos\/(?:[^/]+\/)?\d{6,30}\/?$/i.test(path || "")) return true;
-      if (/^\/watch\/?$/i.test(path || "") && /[?&]v=\d{6,30}/i.test(search || "")) return true;
+      if (/^\/watch\/?$/i.test(path || "")) {
+        try {
+          const s = String(search || "");
+          const params = new URLSearchParams(s.startsWith("?") ? s : `?${s}`);
+          const watchId = params.get("v");
+          return Boolean(watchId && /^\d{6,30}$/.test(watchId.trim()));
+        } catch (_) {
+          return false;
+        }
+      }
       return false;
     }
   };
