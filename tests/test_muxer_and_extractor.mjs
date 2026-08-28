@@ -229,6 +229,44 @@ describe("FbExtractor (lib/extractor.js)", () => {
     assert.ok(res.audioUrl && res.audioUrl.includes("audio.mp4"), "Audio URL must survive escaped-quote parsing");
   });
 
+  it("should prioritize DASH manifest with audio over progressive URLs", () => {
+    const manifest = String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"720\" height=\"1280\" bandwidth=\"800000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/video.mp4?oe=123<\/BaseURL><\/Representation><\/AdaptationSet><AdaptationSet contentType=\"audio\"><Representation id=\"a1\" mimeType=\"audio/mp4\" bandwidth=\"64000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/a\/audio.mp4?oe=123<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`;
+    const text = JSON.stringify({
+      browser_native_hd_url: "https://video.xx.fbcdn.net/v/t1/progressive_hd.mp4?oe=123",
+      browser_native_sd_url: "https://video.xx.fbcdn.net/v/t1/progressive_sd.mp4?oe=123",
+      dash_manifest: manifest
+    });
+    const res = FbExtractor.extractStreamsFromText(text);
+    assert.ok(res, "Result must be defined");
+    assert.equal(res.isProgressive, false, "Must choose DASH over progressive when DASH has separate audio");
+    assert.equal(res.isDashSeparate, true);
+    assert.ok(res.audioUrl && res.audioUrl.includes("audio.mp4"));
+  });
+
+  it("should inherit mimeType and codecs from parent AdaptationSet in parseDashManifest", () => {
+    const xml = `
+      <MPD>
+        <Period>
+          <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.64002a">
+            <Representation id="v1" width="1080" height="1920" bandwidth="4000000">
+              <BaseURL>https://video-sin6-4.xx.fbcdn.net/o1/v/video_hd.mp4?oe=123</BaseURL>
+            </Representation>
+          </AdaptationSet>
+          <AdaptationSet contentType="audio" mimeType="audio/mp4" codecs="mp4a.40.2">
+            <Representation id="a1" bandwidth="128000">
+              <BaseURL>https://video-sin6-4.xx.fbcdn.net/o1/a/audio_hd.mp4?oe=123</BaseURL>
+            </Representation>
+          </AdaptationSet>
+        </Period>
+      </MPD>
+    `;
+    const res = FbExtractor.parseDashManifest(xml);
+    assert.ok(res);
+    assert.equal(res.isDashSeparate, true, "Must recognize separate A/V tracks via inherited contentType/mimeType");
+    assert.ok(res.hdUrl.includes("video_hd.mp4"));
+    assert.ok(res.audioUrl.includes("audio_hd.mp4"));
+  });
+
   it("should validate Facebook CDN media hostnames and block unauthorized domains", () => {
     assert.equal(FbExtractor.isValidMediaStream("https://video-sin6-4.xx.fbcdn.net/o1/v/file.mp4"), true);
     assert.equal(FbExtractor.isValidMediaStream("https://scontent.xx.fbsbx.com/v/t1/file.mp4"), true);

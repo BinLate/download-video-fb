@@ -339,51 +339,119 @@ function parseDashManifest(manifestText) {
   const videos = [];
   const audios = [];
 
+  const adaptRegex = /<AdaptationSet\b([^>]*)>([\s\S]*?)<\/AdaptationSet>/gi;
   const repRegex = /<Representation\b([^>]*)>([\s\S]*?)<\/Representation>/gi;
   const baseUrlRegex = /<BaseURL\b[^>]*>([^<]+)<\/BaseURL>/i;
 
-  let repMatch;
-  while ((repMatch = repRegex.exec(decoded)) !== null) {
-    const attrs = repMatch[1];
-    const body = repMatch[2];
+  let hasRepresentations = false;
+  let adaptMatch;
 
-    const urlMatch = baseUrlRegex.exec(body);
-    if (!urlMatch) continue;
+  while ((adaptMatch = adaptRegex.exec(decoded)) !== null) {
+    const adaptAttrs = adaptMatch[1];
+    const adaptBody = adaptMatch[2];
 
-    const rawUrl = cleanMediaUrl(urlMatch[1]);
-    if (!rawUrl) continue;
+    const adaptMimeM = adaptAttrs.match(/mimeType=["']([^"']+)["']/i);
+    const adaptContentTypeM = adaptAttrs.match(/contentType=["']([^"']+)["']/i);
+    const adaptCodecsM = adaptAttrs.match(/codecs=["']([^"']+)["']/i);
 
-    const mimeM = attrs.match(/mimeType=["']([^"']+)["']/i);
-    const widthM = attrs.match(/width=["'](\d+)["']/i);
-    const heightM = attrs.match(/height=["'](\d+)["']/i);
-    const bwM = attrs.match(/bandwidth=["'](\d+)["']/i);
-    const codecsM = attrs.match(/codecs=["']([^"']+)["']/i);
-    const qualityM = attrs.match(/FBQualityLabel=["']([^"']+)["']/i);
+    const adaptMime = adaptMimeM ? adaptMimeM[1].toLowerCase() : "";
+    const adaptContentType = adaptContentTypeM ? adaptContentTypeM[1].toLowerCase() : "";
+    const adaptCodecs = adaptCodecsM ? adaptCodecsM[1].toLowerCase() : "";
 
-    const mime = mimeM ? mimeM[1].toLowerCase() : "";
-    const width = widthM ? parseInt(widthM[1], 10) : 0;
-    const height = heightM ? parseInt(heightM[1], 10) : 0;
-    const bandwidth = bwM ? parseInt(bwM[1], 10) : 0;
-    const codecs = codecsM ? codecsM[1].toLowerCase() : "";
-    const qualityLabel = qualityM ? qualityM[1] : "";
+    let repMatch;
+    repRegex.lastIndex = 0;
 
-    const isAudio = mime.includes("audio") || /^(mp4a|opus|aac)/i.test(codecs);
-    const isVideo = !isAudio && (mime.includes("video") || width > 0 || height > 0 || /^(avc1|vp09|vp9|av01|hev1|hvc1)/i.test(codecs));
+    while ((repMatch = repRegex.exec(adaptBody)) !== null) {
+      hasRepresentations = true;
+      const attrs = repMatch[1];
+      const body = repMatch[2];
 
-    const item = {
-      url: rawUrl,
-      width,
-      height,
-      bandwidth,
-      codecs,
-      qualityLabel,
-      mime
-    };
+      const urlMatch = baseUrlRegex.exec(body);
+      if (!urlMatch) continue;
 
-    if (isAudio) {
-      audios.push(item);
-    } else {
-      videos.push(item);
+      const rawUrl = cleanMediaUrl(urlMatch[1]);
+      if (!rawUrl) continue;
+
+      const mimeM = attrs.match(/mimeType=["']([^"']+)["']/i);
+      const widthM = attrs.match(/width=["'](\d+)["']/i);
+      const heightM = attrs.match(/height=["'](\d+)["']/i);
+      const bwM = attrs.match(/bandwidth=["'](\d+)["']/i);
+      const codecsM = attrs.match(/codecs=["']([^"']+)["']/i);
+      const qualityM = attrs.match(/FBQualityLabel=["']([^"']+)["']/i);
+
+      const mime = mimeM ? mimeM[1].toLowerCase() : (adaptMime || adaptContentType || "");
+      const width = widthM ? parseInt(widthM[1], 10) : 0;
+      const height = heightM ? parseInt(heightM[1], 10) : 0;
+      const bandwidth = bwM ? parseInt(bwM[1], 10) : 0;
+      const codecs = codecsM ? codecsM[1].toLowerCase() : adaptCodecs;
+      const qualityLabel = qualityM ? qualityM[1] : "";
+
+      const isAudio = mime.includes("audio") || adaptContentType.includes("audio") || /^(mp4a|opus|aac)/i.test(codecs);
+      const isVideo = !isAudio && (mime.includes("video") || adaptContentType.includes("video") || width > 0 || height > 0 || /^(avc1|vp09|vp9|av01|hev1|hvc1)/i.test(codecs));
+
+      const item = {
+        url: rawUrl,
+        width,
+        height,
+        bandwidth,
+        codecs,
+        qualityLabel,
+        mime
+      };
+
+      if (isAudio) {
+        audios.push(item);
+      } else {
+        videos.push(item);
+      }
+    }
+  }
+
+  if (!hasRepresentations) {
+    repRegex.lastIndex = 0;
+    let repMatch;
+    while ((repMatch = repRegex.exec(decoded)) !== null) {
+      const attrs = repMatch[1];
+      const body = repMatch[2];
+
+      const urlMatch = baseUrlRegex.exec(body);
+      if (!urlMatch) continue;
+
+      const rawUrl = cleanMediaUrl(urlMatch[1]);
+      if (!rawUrl) continue;
+
+      const mimeM = attrs.match(/mimeType=["']([^"']+)["']/i);
+      const widthM = attrs.match(/width=["'](\d+)["']/i);
+      const heightM = attrs.match(/height=["'](\d+)["']/i);
+      const bwM = attrs.match(/bandwidth=["'](\d+)["']/i);
+      const codecsM = attrs.match(/codecs=["']([^"']+)["']/i);
+      const qualityM = attrs.match(/FBQualityLabel=["']([^"']+)["']/i);
+
+      const mime = mimeM ? mimeM[1].toLowerCase() : "";
+      const width = widthM ? parseInt(widthM[1], 10) : 0;
+      const height = heightM ? parseInt(heightM[1], 10) : 0;
+      const bandwidth = bwM ? parseInt(bwM[1], 10) : 0;
+      const codecs = codecsM ? codecsM[1].toLowerCase() : "";
+      const qualityLabel = qualityM ? qualityM[1] : "";
+
+      const isAudio = mime.includes("audio") || /^(mp4a|opus|aac)/i.test(codecs);
+      const isVideo = !isAudio && (mime.includes("video") || width > 0 || height > 0 || /^(avc1|vp09|vp9|av01|hev1|hvc1)/i.test(codecs));
+
+      const item = {
+        url: rawUrl,
+        width,
+        height,
+        bandwidth,
+        codecs,
+        qualityLabel,
+        mime
+      };
+
+      if (isAudio) {
+        audios.push(item);
+      } else {
+        videos.push(item);
+      }
     }
   }
 
@@ -430,7 +498,8 @@ function parseDashManifest(manifestText) {
     sdUrl,
     audioUrl: audios.length > 0 ? audios[0].url : null,
     videos,
-    audios
+    audios,
+    isDashSeparate: audios.length > 0 && videos.length > 0
   };
 }
 

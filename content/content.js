@@ -326,6 +326,11 @@
       </button>
     `;
 
+    const getFreshVideoInfo = () => {
+      const currentInstanceId = video.getAttribute("data-binlate-instance-id");
+      return detectedVideos.get(currentInstanceId) || videoInfo;
+    };
+
     mainBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       e.preventDefault();
@@ -343,9 +348,10 @@
         dropdown.classList.remove("binlate-active");
 
         const actionType = item.getAttribute("data-quality");
+        const freshInfo = getFreshVideoInfo();
 
         if (actionType === "COPY") {
-          const targetUrl = videoInfo.url || videoInfo.postLink || window.location.href;
+          const targetUrl = freshInfo.url || freshInfo.postLink || window.location.href;
           try {
             await navigator.clipboard.writeText(targetUrl);
             showToast("Đã sao chép liên kết vào clipboard!");
@@ -355,7 +361,7 @@
           return;
         }
 
-        triggerDownload(videoInfo, actionType);
+        triggerDownload(freshInfo, actionType);
       });
     });
 
