@@ -518,6 +518,56 @@ describe("FbExtractor (lib/extractor.js)", () => {
     assert.ok(map.get("500000000001").hdUrl.includes("stress_1.mp4"));
     assert.ok(map.get("5000000000050").hdUrl.includes("stress_50.mp4"));
   });
+
+  it("should strictly prevent mapping video streams to numeric parent or ancestor IDs", () => {
+    const scriptWithNumericParentId = JSON.stringify({
+      id: "1111222233334444", // Numeric User or Post container ID
+      user_name: "Facebook User",
+      story_video: {
+        id: "5555666677778888", // Authoritative Video ID
+        __typename: "Video",
+        dash_manifest: String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"1080\" height=\"1920\" bandwidth=\"3000000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/non_contam_hd.mp4?oe=777<\/BaseURL><\/Representation><\/AdaptationSet><AdaptationSet contentType=\"audio\"><Representation id=\"a1\" mimeType=\"audio/mp4\" bandwidth=\"128000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/a\/non_contam_audio.mp4?oe=777<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`
+      }
+    });
+
+    const map = FbExtractor.extractUrlsFromScriptText(scriptWithNumericParentId);
+    assert.ok(map.has("5555666677778888"), "Must associate stream with video ID");
+    assert.equal(map.has("1111222233334444"), false, "Numeric parent ID must NOT be contaminated with video stream");
+  });
+
+  it("should scale linearly O(N) when parsing deeply nested large JSON script payloads", () => {
+    function buildNestedPayload(depth) {
+      let current = {
+        video: {
+          id: "999988887777",
+          __typename: "Video",
+          dash_manifest: String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"1080\" height=\"1920\" bandwidth=\"3000000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/depth.mp4?oe=1<\/BaseURL><\/Representation><\/AdaptationSet><AdaptationSet contentType=\"audio\"><Representation id=\"a1\" mimeType=\"audio/mp4\" bandwidth=\"128000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/a\/depth_audio.mp4?oe=1<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`
+        }
+      };
+      for (let i = 0; i < depth; i++) {
+        current = {
+          id: `parent_level_${i}`,
+          data: "d".repeat(100),
+          nested: current
+        };
+      }
+      return JSON.stringify(current);
+    }
+
+    const payloadSmall = buildNestedPayload(50);
+    const payloadLarge = buildNestedPayload(200);
+
+    const t0 = Date.now();
+    for (let i = 0; i < 5; i++) FbExtractor.extractUrlsFromScriptText(payloadSmall);
+    const durationSmall = (Date.now() - t0) / 5;
+
+    const t1 = Date.now();
+    for (let i = 0; i < 5; i++) FbExtractor.extractUrlsFromScriptText(payloadLarge);
+    const durationLarge = (Date.now() - t1) / 5;
+
+    // Linear scaling: 4x payload increase should not cause quadratic slowdown
+    assert.ok(durationLarge < Math.max(durationSmall * 10, 50), `Large payload (${durationLarge}ms) scaled linearly vs Small (${durationSmall}ms)`);
+  });
 });
 
 describe("Stream Budget & Memory Protection (fetchWithBudget)", () => {
