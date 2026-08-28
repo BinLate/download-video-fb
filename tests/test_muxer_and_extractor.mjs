@@ -568,6 +568,20 @@ describe("FbExtractor (lib/extractor.js)", () => {
     // Linear scaling: 4x payload increase should not cause quadratic slowdown
     assert.ok(durationLarge < Math.max(durationSmall * 10, 50), `Large payload (${durationLarge}ms) scaled linearly vs Small (${durationSmall}ms)`);
   });
+
+  it("should not map numeric container ID when nested child video node lacks its own ID", () => {
+    const containerWithChildStreamNoId = JSON.stringify({
+      container: {
+        id: "1111222233334444",
+        story_video: {
+          dash_manifest: String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"1080\" height=\"1920\" bandwidth=\"3000000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/anonymous_stream.mp4?oe=111<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`
+        }
+      }
+    });
+
+    const map = FbExtractor.extractUrlsFromScriptText(containerWithChildStreamNoId);
+    assert.equal(map.has("1111222233334444"), false, "Container ID must NOT receive stream from anonymous child video node");
+  });
 });
 
 describe("Stream Budget & Memory Protection (fetchWithBudget)", () => {
