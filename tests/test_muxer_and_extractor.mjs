@@ -1302,3 +1302,148 @@ describe("Canonical Video ID & Correlation Lifecycle (Production FbExtractor)", 
   });
 });
 
+// =============================================================================
+// Download Decision / Mux Flow Tests (v1.2.1)
+// =============================================================================
+describe("Download Decision & Mux Flow (v1.2.1)", () => {
+
+  // ---------- Test 1: Progressive MP4 with audio ----------
+  it("T1: extractStreamsFromText returns progressiveHdUrl for progressive MP4", () => {
+    const text = `{"browser_native_hd_url":"https://video-sin6-4.xx.fbcdn.net/hd_prog.mp4?oe=ABC","browser_native_sd_url":"https://video-sin6-4.xx.fbcdn.net/sd_prog.mp4?oe=DEF"}`;
+    const result = FbExtractor.extractStreamsFromText(text);
+    assert.ok(result, "Should parse progressive URLs");
+    assert.ok(result.isProgressive, "Should be marked progressive");
+    assert.ok(result.hdUrl.includes("hd_prog.mp4"), "HD URL correct");
+    assert.ok(result.sdUrl.includes("sd_prog.mp4"), "SD URL correct");
+    assert.equal(result.audioUrl, null, "Progressive has no separate audio URL");
+    assert.ok(result.progressiveHdUrl.includes("hd_prog.mp4"), "progressiveHdUrl populated");
+    assert.ok(result.progressiveSdUrl.includes("sd_prog.mp4"), "progressiveSdUrl populated");
+  });
+
+  // ---------- Test 2: DASH video-only + DASH audio ----------
+  it("T2: extractStreamsFromText returns both video and audio from DASH manifest", () => {
+    const dashXml = `<MPD><Period><AdaptationSet contentType="video"><Representation mimeType="video/mp4" width="1080" height="1920" bandwidth="4000000" codecs="avc1.64002a"><BaseURL>https://video-sin6-4.xx.fbcdn.net/dash_video.mp4?oe=X</BaseURL></Representation></AdaptationSet><AdaptationSet contentType="audio"><Representation mimeType="audio/mp4" bandwidth="128000" codecs="mp4a.40.2"><BaseURL>https://video-sin6-4.xx.fbcdn.net/dash_audio.mp4?oe=Y</BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const text = `{"dash_manifest":"${dashXml.replace(/"/g, '\\"')}"}`;
+    const result = FbExtractor.extractStreamsFromText(text);
+    assert.ok(result, "Should parse DASH manifest");
+    assert.equal(result.isProgressive, false, "DASH is not progressive");
+    assert.ok(result.isDashSeparate, "DASH has separate audio");
+    assert.ok(result.hdUrl.includes("dash_video.mp4"), "Video URL from DASH");
+    assert.ok(result.audioUrl.includes("dash_audio.mp4"), "Audio URL from DASH");
+  });
+
+  // ---------- Test 3: Multiple FB videos — audio matched to correct videoId ----------
+  it("T3: extractUrlsFromScriptText matches audio to correct video across multiple videos", () => {
+    const script = `{
+      "video_id": "111111111111",
+      "dash_manifest": "<MPD><Period><AdaptationSet contentType=\\"video\\"><Representation mimeType=\\"video/mp4\\" width=\\"1080\\" height=\\"1920\\" bandwidth=\\"4000000\\"><BaseURL>https://video-sin6-4.xx.fbcdn.net/v1_video.mp4?oe=A</BaseURL></Representation></AdaptationSet><AdaptationSet contentType=\\"audio\\"><Representation mimeType=\\"audio/mp4\\" bandwidth=\\"128000\\"><BaseURL>https://video-sin6-4.xx.fbcdn.net/v1_audio.mp4?oe=B</BaseURL></Representation></AdaptationSet></Period></MPD>"
+    }
+    {
+      "video_id": "222222222222",
+      "dash_manifest": "<MPD><Period><AdaptationSet contentType=\\"video\\"><Representation mimeType=\\"video/mp4\\" width=\\"720\\" height=\\"1280\\" bandwidth=\\"2000000\\"><BaseURL>https://video-sin6-4.xx.fbcdn.net/v2_video.mp4?oe=C</BaseURL></Representation></AdaptationSet><AdaptationSet contentType=\\"audio\\"><Representation mimeType=\\"audio/mp4\\" bandwidth=\\"96000\\"><BaseURL>https://video-sin6-4.xx.fbcdn.net/v2_audio.mp4?oe=D</BaseURL></Representation></AdaptationSet></Period></MPD>"
+    }`;
+    const urlsMap = FbExtractor.extractUrlsFromScriptText(script);
+    assert.ok(urlsMap.has("111111111111"), "Video 1 found");
+    assert.ok(urlsMap.has("222222222222"), "Video 2 found");
+    assert.ok(urlsMap.get("111111111111").audioUrl.includes("v1_audio"), "Video 1 gets its own audio");
+    assert.ok(urlsMap.get("222222222222").audioUrl.includes("v2_audio"), "Video 2 gets its own audio");
+    // Cross-contamination check
+    assert.ok(!urlsMap.get("111111111111").audioUrl.includes("v2_audio"), "No cross-contamination V1→V2");
+    assert.ok(!urlsMap.get("222222222222").audioUrl.includes("v1_audio"), "No cross-contamination V2→V1");
+  });
+
+  // ---------- Test 4: Video available, audio missing ----------
+  it("T4: extractStreamsFromText returns audioUrl:null when DASH has no audio AdaptationSet", () => {
+    const dashXml = `<MPD><Period><AdaptationSet contentType="video"><Representation mimeType="video/mp4" width="1080" height="1920" bandwidth="4000000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/video_only.mp4?oe=X</BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const text = `{"dash_manifest":"${dashXml.replace(/"/g, '\\"')}"}`;
+    const result = FbExtractor.extractStreamsFromText(text);
+    assert.ok(result, "Should parse video-only DASH");
+    assert.ok(result.hdUrl.includes("video_only.mp4"), "Video URL present");
+    assert.equal(result.audioUrl, null, "No audio URL when DASH lacks audio");
+    assert.equal(result.isDashSeparate, false, "Not dash separate without audio");
+  });
+
+  // ---------- Test 5: Muxer — plain video + plain audio → merged has 2 traks ----------
+  it("T5: mergeMp4Buffers produces a muxed file with 2 tracks for plain MP4 inputs", () => {
+    const videoBuffer = createSampleMp4(1, false, [0x00, 0x01, 0x02, 0x03]);
+    const audioBuffer = createSampleMp4(1, true, [0x10, 0x11, 0x12, 0x13]);
+    const result = Mp4Muxer.mergeMp4Buffers(videoBuffer, audioBuffer);
+    assert.ok(result, "Result exists");
+    assert.equal(result.muxed, true, "Muxing succeeded");
+    assert.equal(result.tracks, 2, "Output has 2 tracks");
+    assert.equal(result.format, "plain", "Format is plain");
+    assert.ok(result.buffer.byteLength > videoBuffer.byteLength, "Output is larger than video alone");
+  });
+
+  // ---------- Test 6: Muxer — fMP4 video + fMP4 audio → merged has fragments for both ----------
+  it("T6: mergeMp4Buffers produces muxed fMP4 with fragments for both tracks", () => {
+    const videoFmp4 = createFragmentedMp4(1, [[0xAA, 0xBB]], { baseOffsetMode: "moof" });
+    const audioFmp4 = createFragmentedMp4(1, [[0xCC, 0xDD]], { baseOffsetMode: "moof" });
+    const result = Mp4Muxer.mergeMp4Buffers(videoFmp4, audioFmp4);
+    assert.ok(result, "Result exists");
+    assert.equal(result.muxed, true, "fMP4 muxing succeeded");
+    assert.equal(result.format, "fragmented", "Format is fragmented");
+    // Verify both moof boxes exist in output
+    const boxes = Mp4Muxer.findBoxes(result.buffer);
+    const moofBoxes = boxes.filter(b => b.type === "moof");
+    assert.ok(moofBoxes.length >= 2, `Should have at least 2 moof boxes, got ${moofBoxes.length}`);
+  });
+
+  // ---------- Test 7: Muxer — no audio buffer → returns muxed:false ----------
+  it("T7: mergeMp4Buffers returns muxed:false with reason when audio buffer is missing", () => {
+    const videoBuffer = createSampleMp4(1, false);
+    const result = Mp4Muxer.mergeMp4Buffers(videoBuffer, null);
+    assert.ok(result, "Result exists");
+    assert.equal(result.muxed, false, "Muxing did NOT succeed");
+    assert.equal(result.reason, "missing_audio_buffer", "Reason is missing_audio_buffer");
+  });
+
+  // ---------- Test 8: Muxer — mixed fMP4/plain → returns muxed:false ----------
+  it("T8: mergeMp4Buffers returns muxed:false when one input is fMP4 and other is plain", () => {
+    const plainVideo = createSampleMp4(1, false);
+    const fmp4Audio = createFragmentedMp4(1, [[0xCC, 0xDD]], { baseOffsetMode: "moof" });
+    const result = Mp4Muxer.mergeMp4Buffers(plainVideo, fmp4Audio);
+    assert.ok(result, "Result exists");
+    assert.equal(result.muxed, false, "Mixed format muxing failed");
+    assert.ok(result.reason, "Has a failure reason");
+  });
+
+  // ---------- Test 9: Fallback — DASH without audio + progressive available ----------
+  it("T9: extractStreamsFromText preserves progressive URLs when DASH has no audio", () => {
+    const dashXml = `<MPD><Period><AdaptationSet contentType="video"><Representation mimeType="video/mp4" width="1080" height="1920" bandwidth="4000000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/dash_video.mp4?oe=X</BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const text = `{"browser_native_hd_url":"https://video-sin6-4.xx.fbcdn.net/prog_hd.mp4?oe=P","browser_native_sd_url":"https://video-sin6-4.xx.fbcdn.net/prog_sd.mp4?oe=Q","dash_manifest":"${dashXml.replace(/"/g, '\\"')}"}`;
+    const result = FbExtractor.extractStreamsFromText(text);
+    assert.ok(result, "Should parse");
+    // Since DASH has no audio, progressive should be preferred
+    assert.ok(result.isProgressive, "Progressive preferred when DASH has no audio");
+    assert.ok(result.hdUrl.includes("prog_hd.mp4"), "HD URL is progressive");
+    assert.ok(result.progressiveHdUrl.includes("prog_hd.mp4"), "progressiveHdUrl preserved");
+    assert.ok(result.progressiveSdUrl.includes("prog_sd.mp4"), "progressiveSdUrl preserved");
+  });
+
+  // ---------- Test 10: DASH with audio + progressive available → progressive preserved for fallback ----------
+  it("T10: extractStreamsFromText returns DASH as primary but preserves progressive for fallback", () => {
+    const dashXml = `<MPD><Period><AdaptationSet contentType="video"><Representation mimeType="video/mp4" width="1080" height="1920" bandwidth="4000000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/dash_v.mp4?oe=X</BaseURL></Representation></AdaptationSet><AdaptationSet contentType="audio"><Representation mimeType="audio/mp4" bandwidth="128000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/dash_a.mp4?oe=Y</BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const text = `{"browser_native_hd_url":"https://video-sin6-4.xx.fbcdn.net/fallback_prog.mp4?oe=F","dash_manifest":"${dashXml.replace(/"/g, '\\"')}"}`;
+    const result = FbExtractor.extractStreamsFromText(text);
+    assert.ok(result, "Should parse");
+    // DASH with audio takes priority
+    assert.equal(result.isProgressive, false, "DASH is primary when it has audio");
+    assert.ok(result.hdUrl.includes("dash_v.mp4"), "Primary URL is DASH video");
+    assert.ok(result.audioUrl.includes("dash_a.mp4"), "Audio URL is DASH audio");
+    // But progressive is preserved for fallback
+    assert.ok(result.progressiveHdUrl.includes("fallback_prog.mp4"), "Progressive HD URL preserved as fallback");
+  });
+
+  // ---------- Test 11: Genuinely silent source — no audio in any source ----------
+  it("T11: Video with no audio anywhere returns null audioUrl and no progressive", () => {
+    const dashXml = `<MPD><Period><AdaptationSet contentType="video"><Representation mimeType="video/mp4" width="360" height="640" bandwidth="500000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/silent_dash.mp4?oe=Z</BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const text = `{"dash_manifest":"${dashXml.replace(/"/g, '\\"')}"}`;
+    const result = FbExtractor.extractStreamsFromText(text);
+    assert.ok(result, "Should parse");
+    assert.equal(result.audioUrl, null, "No audio URL");
+    assert.equal(result.progressiveHdUrl, null, "No progressive HD fallback");
+    assert.equal(result.progressiveSdUrl, null, "No progressive SD fallback");
+    // This is a genuinely silent source — downloading video-only is correct
+  });
+});

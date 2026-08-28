@@ -358,6 +358,10 @@
     // REMOVED: fallback_any - it caused cross-Reel contamination
     // Only exact videoId match is allowed
 
+    let isProgressive = false;
+    let progressiveHdUrl = null;
+    let progressiveSdUrl = null;
+
     if (streamMatch) {
       if (quality === "HD" && streamMatch.hdUrl) {
         downloadUrl = streamMatch.hdUrl;
@@ -368,6 +372,9 @@
       }
       audioUrl = streamMatch.audioUrl || null;
       isDashSeparate = Boolean(streamMatch.isDashSeparate || (streamMatch.audioUrl && downloadUrl && streamMatch.audioUrl !== downloadUrl));
+      isProgressive = Boolean(streamMatch.isProgressive);
+      progressiveHdUrl = streamMatch.progressiveHdUrl || null;
+      progressiveSdUrl = streamMatch.progressiveSdUrl || null;
     }
 
     const looksLikeMediaUrl = (candidate) => {
@@ -406,6 +413,9 @@
           url: downloadUrl,
           audioUrl: audioUrl,
           isDashSeparate: isDashSeparate,
+          isProgressive: isProgressive,
+          progressiveHdUrl: progressiveHdUrl,
+          progressiveSdUrl: progressiveSdUrl,
           postUrl: (videoInfo.postLink && !/facebook\.com\/(?:reels?|watch)?\/?$/i.test(videoInfo.postLink))
             ? videoInfo.postLink
             : (authoritativeVideoId ? `https://www.facebook.com/reel/${authoritativeVideoId}` : null),
@@ -553,5 +563,6 @@
     scanPageVideos();
   }
 
-  console.log("[Bin.Late FB Downloader] Content script running & monitoring videos/reels.");
+  const _extVersion = (typeof chrome !== "undefined" && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : "?";
+  console.log(`[Download Video FB] v${_extVersion} content script loaded`);
 })();

@@ -5,6 +5,9 @@
 
 importScripts("lib/extractor.js", "lib/mp4muxer.js", "lib/blob_manager.js");
 
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.1";
+console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
+
 const tabVideosMap = new Map();
 // tabId -> { sessionId, armedAt, list: [{url, videoTyped, ts, session}] }
 // Captures are ONLY recorded while an extraction session is armed for the tab,
@@ -549,12 +552,47 @@ chrome.downloads.onChanged.addListener(async (delta) => {
 });
 
 /**
- * Unified download flow.
+ * Truncate a URL for safe diagnostic logging (remove auth tokens).
  */
-async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false, postUrl, tabId, type = "video", title = "facebook", quality = "HD", selectedSource = null }) {
+function truncateUrlForLog(u) {
+  if (!u || typeof u !== "string") return "(null)";
+  try {
+    const parsed = new URL(u);
+    return `${parsed.hostname}${parsed.pathname.substring(0, 60)}...`;
+  } catch (_) {
+    return u.substring(0, 80) + "...";
+  }
+}
+
+/**
+ * Unified download flow with 3-tier stream selection:
+ *   Tier 1: DASH video + DASH audio → mux into dual-track MP4
+ *   Tier 2: Fall back to progressive MP4 (already contains audio)
+ *   Tier 3: Video-only with explicit warning
+ */
+async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false, isProgressive = false, progressiveHdUrl = null, progressiveSdUrl = null, postUrl, tabId, type = "video", title = "facebook", quality = "HD", selectedSource = null }) {
+  const diag = {
+    version: EXT_VERSION,
+    videoId: null,
+    videoUrl: null,
+    audioUrl: null,
+    isProgressive: false,
+    videoBytes: 0,
+    audioBytes: 0,
+    outputBytes: 0,
+    muxAttempted: false,
+    muxSuccess: false,
+    fallbackUsed: null,
+    hasAudioTrack: false
+  };
+
   let resolvedUrl = null;
   let resolvedAudioUrl = audioUrl;
   let resolvedDashSeparate = isDashSeparate;
+  let resolvedProgressive = isProgressive;
+  let resolvedProgressiveHd = progressiveHdUrl;
+  let resolvedProgressiveSd = progressiveSdUrl;
+  let fullStreamInfo = null; // Store full SSR result for fallback
 
   const captureSessionId = armCaptureSession(tabId);
 
@@ -577,7 +615,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       ? [selectedSource]
       : nudgeSources;
 
-  // 3. Resolve from the post/page URL via SSR + embed strategies only when needed
+  // 3. Resolve from the post/page URL via SSR + embed strategies
   if (!resolvedUrl) {
     if (lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")) {
       const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
@@ -585,22 +623,34 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
         if (typeof streamInfo === "string") {
           resolvedUrl = streamInfo;
         } else {
+          fullStreamInfo = streamInfo;
           resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
           resolvedAudioUrl = streamInfo.audioUrl || null;
           resolvedDashSeparate = !!streamInfo.isDashSeparate;
+          resolvedProgressive = !!streamInfo.isProgressive;
+          resolvedProgressiveHd = streamInfo.progressiveHdUrl || resolvedProgressiveHd;
+          resolvedProgressiveSd = streamInfo.progressiveSdUrl || resolvedProgressiveSd;
         }
       }
     }
   } else if (!resolvedAudioUrl && lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")) {
-    // If we already have resolvedUrl from DOM, only query SSR to enrich audio if lookupTarget has a numeric ID
-    if (/\/(?:reel|reels|videos|watch)(?:\/[^/]+)*\/(\d{6,30})/i.test(lookupTarget) || /[?&]v=(\d{6,30})/.test(lookupTarget)) {
-      const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
-      if (streamInfo && typeof streamInfo === "object" && streamInfo.audioUrl) {
+    // Always attempt SSR audio enrichment when audioUrl is missing, regardless of URL format
+    const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
+    if (streamInfo && typeof streamInfo === "object") {
+      fullStreamInfo = streamInfo;
+      if (streamInfo.audioUrl) {
         resolvedAudioUrl = streamInfo.audioUrl;
         resolvedDashSeparate = true;
       }
+      // Always capture progressive fallback URLs from SSR
+      if (!resolvedProgressiveHd) resolvedProgressiveHd = streamInfo.progressiveHdUrl || null;
+      if (!resolvedProgressiveSd) resolvedProgressiveSd = streamInfo.progressiveSdUrl || null;
     }
   }
+
+  diag.videoUrl = truncateUrlForLog(resolvedUrl);
+  diag.audioUrl = truncateUrlForLog(resolvedAudioUrl);
+  diag.isProgressive = resolvedProgressive;
 
   // 4. Validate we have a resolved URL
   try {
@@ -612,76 +662,126 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       );
     }
 
-    // 5. If this is a separate DASH stream (video + audio), mux them via offscreen!
+    // ========================================================================
+    // TIER 1: DASH video + audio → mux into dual-track MP4
+    // ========================================================================
     if (resolvedUrl && resolvedAudioUrl) {
       if (!FbExtractor.isValidMediaStream(resolvedAudioUrl)) {
-        throw new Error("Đường dẫn âm thanh không hợp lệ hoặc không thuộc máy chủ Facebook.");
+        console.warn(`[Download Video FB] v${EXT_VERSION} Audio URL invalid, skipping Tier 1 mux`);
+      } else {
+        diag.muxAttempted = true;
+        const muxResult = await attemptDashMux(resolvedUrl, resolvedAudioUrl, diag);
+        if (muxResult.success) {
+          diag.muxSuccess = true;
+          diag.hasAudioTrack = true;
+          diag.outputBytes = muxResult.outputBytes || 0;
+          console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
+          return await downloadMedia({
+            url: muxResult.blobUrl,
+            isInternalBlob: true,
+            type, title, quality
+          });
+        }
+        // Tier 1 failed — log and continue to Tier 2
+        console.warn(`[Download Video FB] v${EXT_VERSION} Tier 1 DASH mux failed: ${muxResult.reason}. Attempting fallback...`);
       }
-      const offscreenReady = await ensureOffscreenDocument();
-      if (!offscreenReady) {
-        throw new Error("Không thể khởi tạo bộ ghép video/âm thanh (Offscreen Document không khả dụng).");
-      }
-
-      const muxResponse = await new Promise((resolve) => {
-        chrome.runtime.sendMessage(
-          {
-            action: "OFFSCREEN_MUX_MEDIA",
-            payload: { videoUrl: resolvedUrl, audioUrl: resolvedAudioUrl }
-          },
-          (res) => {
-            if (chrome.runtime.lastError) {
-              resolve({ success: false, error: chrome.runtime.lastError.message });
-            } else {
-              resolve(res || { success: false, error: "Không nhận được phản hồi từ bộ ghép." });
-            }
-          }
-        );
-      });
-
-      if (!muxResponse || !muxResponse.success || !muxResponse.blobUrl) {
-        throw new Error(
-          `Ghép âm thanh và hình ảnh thất bại: ${muxResponse?.error || "Không thể tạo file MP4"}.`
-        );
-      }
-
-      // Fail loudly instead of silently delivering a video-only file.
-      if (muxResponse.isMuxed === false || muxResponse.hasAudio === false) {
-        const reasonMap = {
-          fragmented_mp4_not_supported: "một trong hai luồng là MP4 phân mảnh chưa được hỗ trợ",
-          mixed_fragmented_and_plain_mp4: "hai luồng không cùng định dạng MP4 phân mảnh",
-          missing_moov_or_mdat: "luồng âm thanh tải về không hợp lệ (URL có thể đã hết hạn)",
-          missing_movie_fragments: "luồng âm thanh không chứa dữ liệu phân đoạn",
-          missing_audio_buffer: "không tải được dữ liệu âm thanh",
-          missing_video_buffer: "không tải được dữ liệu video",
-          missing_video_trak: "luồng video thiếu thông tin track",
-          missing_audio_trak: "luồng âm thanh thiếu thông tin track"
-        };
-        const muxReason = reasonMap[muxResponse.reason] || ("lý do: " + (muxResponse.reason || "không xác định"));
-        throw new Error(
-          "Video và âm thanh KHÔNG ghép được (" + muxReason + "). " +
-          "Hãy phát video vài giây rồi thử tải lại."
-        );
-      }
-
-      resolvedUrl = muxResponse.blobUrl;
-      return await downloadMedia({
-        url: resolvedUrl,
-        isInternalBlob: true,
-        type: type,
-        title: title,
-        quality: quality
-      });
+    } else {
+      console.log(`[Download Video FB] v${EXT_VERSION} No audio URL — skipping Tier 1. Progressive: ${resolvedProgressive}`);
     }
 
+    // ========================================================================
+    // TIER 2: Fall back to progressive MP4 (already contains audio)
+    // ========================================================================
+    const progressiveFallback = resolvedProgressiveHd || resolvedProgressiveSd;
+    if (progressiveFallback && isValidMediaStream(progressiveFallback)) {
+      // Don't use this fallback if the resolved URL is already progressive (same URL)
+      if (progressiveFallback !== resolvedUrl || resolvedProgressive) {
+        diag.fallbackUsed = "progressive";
+        diag.hasAudioTrack = true; // Progressive MP4s contain embedded audio
+        console.log(`[Download Video FB] v${EXT_VERSION} Tier 2: Using progressive MP4 fallback: ${truncateUrlForLog(progressiveFallback)}`);
+        console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
+        return await downloadMedia({
+          url: progressiveFallback,
+          isInternalBlob: false,
+          type, title, quality
+        });
+      }
+    }
+
+    // ========================================================================
+    // TIER 3: Download whatever we have — but warn if it may be silent
+    // ========================================================================
+    if (resolvedProgressive) {
+      // Progressive MP4 — probably has audio embedded
+      diag.fallbackUsed = "progressive_original";
+      diag.hasAudioTrack = true;
+      console.log(`[Download Video FB] v${EXT_VERSION} Tier 3: Progressive download (likely has audio)`);
+    } else {
+      // DASH video-only — warn the user
+      diag.fallbackUsed = "video_only";
+      diag.hasAudioTrack = false;
+      console.warn(`[Download Video FB] v${EXT_VERSION} Tier 3: Downloading video-only stream (NO audio). No progressive fallback available.`);
+    }
+
+    console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
     return await downloadMedia({
       url: resolvedUrl,
       isInternalBlob: false,
-      type: type,
-      title: title,
-      quality: quality
+      type, title, quality
     });
   } finally {
     if (captureSessionId !== null) disarmCaptureSession(tabId, captureSessionId);
+  }
+}
+
+/**
+ * Attempt DASH mux via offscreen document.
+ * Returns { success, blobUrl, reason, outputBytes } — never throws.
+ */
+async function attemptDashMux(videoUrl, audioUrl, diag) {
+  try {
+    const offscreenReady = await ensureOffscreenDocument();
+    if (!offscreenReady) {
+      return { success: false, reason: "offscreen_unavailable" };
+    }
+
+    const muxResponse = await new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          action: "OFFSCREEN_MUX_MEDIA",
+          payload: { videoUrl, audioUrl }
+        },
+        (res) => {
+          if (chrome.runtime.lastError) {
+            resolve({ success: false, error: chrome.runtime.lastError.message, reason: "message_error" });
+          } else {
+            resolve(res || { success: false, error: "Không nhận được phản hồi từ bộ ghép.", reason: "no_response" });
+          }
+        }
+      );
+    });
+
+    // Update diagnostic info from mux response
+    if (muxResponse) {
+      diag.videoBytes = muxResponse.videoBytesLength || 0;
+      diag.audioBytes = muxResponse.audioBytesLength || 0;
+    }
+
+    if (muxResponse && muxResponse.success && muxResponse.blobUrl && muxResponse.isMuxed && muxResponse.hasAudio) {
+      return {
+        success: true,
+        blobUrl: muxResponse.blobUrl,
+        reason: null,
+        outputBytes: muxResponse.outputBytesLength || 0
+      };
+    }
+
+    return {
+      success: false,
+      reason: muxResponse?.reason || muxResponse?.error || "mux_failed"
+    };
+  } catch (err) {
+    return { success: false, reason: err?.message || "mux_exception" };
   }
 }
 
