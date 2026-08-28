@@ -267,6 +267,78 @@ describe("FbExtractor (lib/extractor.js)", () => {
     assert.ok(res.audioUrl.includes("audio_hd.mp4"));
   });
 
+  it("should parse GraphQL representations array with separate video and audio streams", () => {
+    const repArrayJson = JSON.stringify([
+      {
+        id: "rep_1080p",
+        base_url: "https://video.xx.fbcdn.net/o1/v/t2/reel_1080p.mp4?oe=123",
+        mime_type: "video/mp4",
+        codecs: "avc1.64002a",
+        width: 1080,
+        height: 1920,
+        bandwidth: 3500000,
+        quality_label: "1080p"
+      },
+      {
+        id: "rep_720p",
+        base_url: "https://video.xx.fbcdn.net/o1/v/t2/reel_720p.mp4?oe=123",
+        mime_type: "video/mp4",
+        codecs: "avc1.4d401f",
+        width: 720,
+        height: 1280,
+        bandwidth: 1500000,
+        quality_label: "720p"
+      },
+      {
+        id: "rep_audio",
+        base_url: "https://video.xx.fbcdn.net/o1/a/t2/reel_audio.mp4?oe=123",
+        mime_type: "audio/mp4",
+        codecs: "mp4a.40.2",
+        bandwidth: 128000,
+        quality_label: "AUDIO"
+      }
+    ]);
+
+    const res = FbExtractor.parseRepresentationsArray(repArrayJson);
+    assert.ok(res, "GraphQL representations must be parsed");
+    assert.equal(res.videos.length, 2, "Must extract 2 video streams");
+    assert.equal(res.audios.length, 1, "Must extract 1 audio stream");
+    assert.equal(res.isDashSeparate, true, "Must flag as separate A/V streams");
+    assert.ok(res.hdUrl.includes("reel_1080p.mp4"), "HD must be 1080p");
+    assert.ok(res.sdUrl.includes("reel_720p.mp4"), "SD must be 720p");
+    assert.ok(res.audioUrl.includes("reel_audio.mp4"), "Audio URL must be extracted");
+  });
+
+  it("should extract GraphQL representations and audio stream from raw script text", () => {
+    const rawText = JSON.stringify({
+      video_id: "9876543210123",
+      representations: [
+        {
+          id: "v1",
+          base_url: "https://video.xx.fbcdn.net/v/reel_hd.mp4?oe=456",
+          mime_type: "video/mp4",
+          codecs: "avc1.64002a",
+          width: 1080,
+          height: 1920,
+          bandwidth: 2500000
+        },
+        {
+          id: "a1",
+          base_url: "https://video.xx.fbcdn.net/a/reel_audio.mp4?oe=456",
+          mime_type: "audio/mp4",
+          codecs: "mp4a.40.2",
+          bandwidth: 128000
+        }
+      ]
+    });
+
+    const res = FbExtractor.extractStreamsFromText(rawText);
+    assert.ok(res, "Streams must be extracted from raw text with representations");
+    assert.equal(res.isDashSeparate, true, "Must be DASH separate");
+    assert.ok(res.hdUrl.includes("reel_hd.mp4"));
+    assert.ok(res.audioUrl.includes("reel_audio.mp4"));
+  });
+
   it("should validate Facebook CDN media hostnames and block unauthorized domains", () => {
     assert.equal(FbExtractor.isValidMediaStream("https://video-sin6-4.xx.fbcdn.net/o1/v/file.mp4"), true);
     assert.equal(FbExtractor.isValidMediaStream("https://scontent.xx.fbsbx.com/v/t1/file.mp4"), true);

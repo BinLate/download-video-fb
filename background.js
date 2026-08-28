@@ -296,318 +296,28 @@ try {
  * Decode JSON/Unicode/XML-escaped sequences.
  */
 function decodeFbEscapes(text) {
-  if (!text) return "";
-  return text
-    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-    .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-    .replace(/\\+\//g, "/")
-    .replace(/\\+\\/g, "\\")
-    .replace(/\\+"/g, '"')
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    // Unescape JSON backslash sequences (\", \/, \\) so DASH XML attributes parse correctly.
-    .replace(/\\([\\"'/])/g, "$1");
+  return FbExtractor.decodeFbEscapes(text);
 }
 
 /**
  * Clean URL and strip trailing XML tags or byte-range parameters.
  */
 function cleanMediaUrl(u) {
-  if (!u || typeof u !== "string") return null;
-  let cleaned = decodeFbEscapes(u).trim();
-  // Strip trailing %3C/BaseURL or </BaseURL>
-  cleaned = cleaned.replace(/(%3C|<)\/?BaseURL.*$/i, "").trim();
-  // Strip bytestart/byteend range parameters so the full continuous stream is downloaded
-  cleaned = cleaned.replace(/[?&]bytestart=\d+/g, "");
-  cleaned = cleaned.replace(/[?&]byteend=\d+/g, "");
-  if (!cleaned.includes("?") && cleaned.includes("&")) {
-    cleaned = cleaned.replace("&", "?");
-  }
-  if (!cleaned.startsWith("http")) return null;
-  return cleaned;
+  return FbExtractor.cleanMediaUrl(u);
 }
 
 /**
- * Parse DASH MPD XML manifest into ranked HD, SD, and Audio stream URLs.
+ * Validate that URL belongs to authorized Facebook CDN hosts.
  */
-function parseDashManifest(manifestText) {
-  if (!manifestText) return null;
-  const decoded = decodeFbEscapes(manifestText);
-
-  const videos = [];
-  const audios = [];
-
-  const adaptRegex = /<AdaptationSet\b([^>]*)>([\s\S]*?)<\/AdaptationSet>/gi;
-  const repRegex = /<Representation\b([^>]*)>([\s\S]*?)<\/Representation>/gi;
-  const baseUrlRegex = /<BaseURL\b[^>]*>([^<]+)<\/BaseURL>/i;
-
-  let hasRepresentations = false;
-  let adaptMatch;
-
-  while ((adaptMatch = adaptRegex.exec(decoded)) !== null) {
-    const adaptAttrs = adaptMatch[1];
-    const adaptBody = adaptMatch[2];
-
-    const adaptMimeM = adaptAttrs.match(/mimeType=["']([^"']+)["']/i);
-    const adaptContentTypeM = adaptAttrs.match(/contentType=["']([^"']+)["']/i);
-    const adaptCodecsM = adaptAttrs.match(/codecs=["']([^"']+)["']/i);
-
-    const adaptMime = adaptMimeM ? adaptMimeM[1].toLowerCase() : "";
-    const adaptContentType = adaptContentTypeM ? adaptContentTypeM[1].toLowerCase() : "";
-    const adaptCodecs = adaptCodecsM ? adaptCodecsM[1].toLowerCase() : "";
-
-    let repMatch;
-    repRegex.lastIndex = 0;
-
-    while ((repMatch = repRegex.exec(adaptBody)) !== null) {
-      hasRepresentations = true;
-      const attrs = repMatch[1];
-      const body = repMatch[2];
-
-      const urlMatch = baseUrlRegex.exec(body);
-      if (!urlMatch) continue;
-
-      const rawUrl = cleanMediaUrl(urlMatch[1]);
-      if (!rawUrl) continue;
-
-      const mimeM = attrs.match(/mimeType=["']([^"']+)["']/i);
-      const widthM = attrs.match(/width=["'](\d+)["']/i);
-      const heightM = attrs.match(/height=["'](\d+)["']/i);
-      const bwM = attrs.match(/bandwidth=["'](\d+)["']/i);
-      const codecsM = attrs.match(/codecs=["']([^"']+)["']/i);
-      const qualityM = attrs.match(/FBQualityLabel=["']([^"']+)["']/i);
-
-      const mime = mimeM ? mimeM[1].toLowerCase() : (adaptMime || adaptContentType || "");
-      const width = widthM ? parseInt(widthM[1], 10) : 0;
-      const height = heightM ? parseInt(heightM[1], 10) : 0;
-      const bandwidth = bwM ? parseInt(bwM[1], 10) : 0;
-      const codecs = codecsM ? codecsM[1].toLowerCase() : adaptCodecs;
-      const qualityLabel = qualityM ? qualityM[1] : "";
-
-      const isAudio = mime.includes("audio") || adaptContentType.includes("audio") || /^(mp4a|opus|aac)/i.test(codecs);
-      const isVideo = !isAudio && (mime.includes("video") || adaptContentType.includes("video") || width > 0 || height > 0 || /^(avc1|vp09|vp9|av01|hev1|hvc1)/i.test(codecs));
-
-      const item = {
-        url: rawUrl,
-        width,
-        height,
-        bandwidth,
-        codecs,
-        qualityLabel,
-        mime
-      };
-
-      if (isAudio) {
-        audios.push(item);
-      } else {
-        videos.push(item);
-      }
-    }
-  }
-
-  if (!hasRepresentations) {
-    repRegex.lastIndex = 0;
-    let repMatch;
-    while ((repMatch = repRegex.exec(decoded)) !== null) {
-      const attrs = repMatch[1];
-      const body = repMatch[2];
-
-      const urlMatch = baseUrlRegex.exec(body);
-      if (!urlMatch) continue;
-
-      const rawUrl = cleanMediaUrl(urlMatch[1]);
-      if (!rawUrl) continue;
-
-      const mimeM = attrs.match(/mimeType=["']([^"']+)["']/i);
-      const widthM = attrs.match(/width=["'](\d+)["']/i);
-      const heightM = attrs.match(/height=["'](\d+)["']/i);
-      const bwM = attrs.match(/bandwidth=["'](\d+)["']/i);
-      const codecsM = attrs.match(/codecs=["']([^"']+)["']/i);
-      const qualityM = attrs.match(/FBQualityLabel=["']([^"']+)["']/i);
-
-      const mime = mimeM ? mimeM[1].toLowerCase() : "";
-      const width = widthM ? parseInt(widthM[1], 10) : 0;
-      const height = heightM ? parseInt(heightM[1], 10) : 0;
-      const bandwidth = bwM ? parseInt(bwM[1], 10) : 0;
-      const codecs = codecsM ? codecsM[1].toLowerCase() : "";
-      const qualityLabel = qualityM ? qualityM[1] : "";
-
-      const isAudio = mime.includes("audio") || /^(mp4a|opus|aac)/i.test(codecs);
-      const isVideo = !isAudio && (mime.includes("video") || width > 0 || height > 0 || /^(avc1|vp09|vp9|av01|hev1|hvc1)/i.test(codecs));
-
-      const item = {
-        url: rawUrl,
-        width,
-        height,
-        bandwidth,
-        codecs,
-        qualityLabel,
-        mime
-      };
-
-      if (isAudio) {
-        audios.push(item);
-      } else {
-        videos.push(item);
-      }
-    }
-  }
-
-  // Fallback: direct <BaseURL> extraction
-  if (videos.length === 0) {
-    const allBaseUrls = decoded.match(/<BaseURL\b[^>]*>([^<]+)<\/BaseURL>/gi);
-    if (allBaseUrls) {
-      for (const bu of allBaseUrls) {
-        const m = bu.match(/<BaseURL\b[^>]*>([^<]+)<\/BaseURL>/i);
-        if (m) {
-          const cu = cleanMediaUrl(m[1]);
-          if (cu && (cu.includes("fbcdn.net") || cu.includes("fbsbx.com"))) {
-            videos.push({
-              url: cu,
-              width: 0,
-              height: 0,
-              bandwidth: 0,
-              codecs: "",
-              qualityLabel: "",
-              mime: "video/mp4"
-            });
-          }
-        }
-      }
-    }
-  }
-
-  if (videos.length === 0 && audios.length === 0) return null;
-
-  videos.sort((a, b) => (b.height * b.width - a.height * a.width) || (b.bandwidth - a.bandwidth) || (b.height - a.height));
-  audios.sort((a, b) => b.bandwidth - a.bandwidth);
-
-  const hdUrl = videos.length > 0 ? videos[0].url : null;
-  let sdUrl = null;
-  if (videos.length > 1) {
-    const sdCandidate = videos.find(v => v.height > 0 && v.height <= 640);
-    sdUrl = sdCandidate ? sdCandidate.url : videos[videos.length - 1].url;
-  } else {
-    sdUrl = hdUrl;
-  }
-
-  return {
-    hdUrl,
-    sdUrl,
-    audioUrl: audios.length > 0 ? audios[0].url : null,
-    videos,
-    audios,
-    isDashSeparate: audios.length > 0 && videos.length > 0
-  };
-}
-
-/**
- * Scan any fbcdn MP4 URL embedded inside a text blob.
- */
-function extractGenericMp4FromText(text) {
-  if (!text) return null;
-  const m = text.match(
-    /https?(?::\\?\/\\?\/)[a-z0-9.-]*fbcdn\.net[^"'\s<>]+?\.mp4[^"'\s<>]*/i
-  );
-  return m ? cleanMediaUrl(m[0]) : null;
-}
-
-/**
- * Extract media streams directly from Facebook HTML string.
- */
-function extractStreamsFromHtml(rawHtml) {
-  if (!rawHtml) return null;
-  const textsToTry = [rawHtml];
-  const decoded = decodeFbEscapes(rawHtml);
-  if (decoded !== rawHtml) textsToTry.push(decoded);
-
-  let hdUrl = null;
-  let sdUrl = null;
-
-  for (const text of textsToTry) {
-    // 1. Progressive streams
-    const hdMatch = text.match(/"(?:playable_url_quality_hd|browser_native_hd_url|hd_src_no_ratelimit|hd_src)"\s*:\s*"([^"]+)"/);
-    const sdMatch = text.match(/"(?:playable_url|browser_native_sd_url|sd_src_no_ratelimit|sd_src)"\s*:\s*"([^"]+)"/);
-    if (hdMatch) hdUrl = hdUrl || cleanMediaUrl(hdMatch[1]);
-    if (sdMatch) sdUrl = sdUrl || cleanMediaUrl(sdMatch[1]);
-
-    // 2. DASH Manifest
-    const dashMatch = text.match(/"(?:dash_manifest|playback_video_dash_xml|video_dash_manifest|dash_manifest_xml)"\s*:\s*"([^"]+)"/);
-    if (dashMatch) {
-      const dashParsed = parseDashManifest(dashMatch[1]);
-      if (dashParsed) {
-        hdUrl = hdUrl || dashParsed.hdUrl;
-        sdUrl = sdUrl || dashParsed.sdUrl;
-      }
-    } else if (text.includes("<MPD") || text.includes("&lt;MPD") || text.includes("<BaseURL")) {
-      const dashParsed = parseDashManifest(text);
-      if (dashParsed) {
-        hdUrl = hdUrl || dashParsed.hdUrl;
-        sdUrl = sdUrl || dashParsed.sdUrl;
-      }
-    }
-
-    // 3. GraphQL representations array
-    if (!hdUrl && !sdUrl) {
-      const repArrayMatch = text.match(/"representations"\s*:\s*\[([\s\S]*?)\]/);
-      if (repArrayMatch) {
-        const baseUrls = repArrayMatch[1].match(/"base_url"\s*:\s*"([^"]+)"/g);
-        if (baseUrls && baseUrls.length > 0) {
-          const extracted = baseUrls.map(b => {
-            const m = b.match(/"base_url"\s*:\s*"([^"]+)"/);
-            return m ? cleanMediaUrl(m[1]) : null;
-          }).filter(Boolean);
-          if (extracted.length > 0) {
-            hdUrl = extracted[0];
-            sdUrl = extracted.length > 1 ? extracted[extracted.length - 1] : extracted[0];
-          }
-        }
-      }
-    }
-
-    if (hdUrl || sdUrl) break;
-  }
-
-  if (!hdUrl && !sdUrl) {
-    for (const text of textsToTry) {
-      const generic = extractGenericMp4FromText(text);
-      if (generic) {
-        sdUrl = generic;
-        break;
-      }
-    }
-  }
-
-  if (hdUrl || sdUrl) {
-    return {
-      hdUrl: hdUrl || sdUrl,
-      sdUrl: sdUrl || hdUrl
-    };
-  }
-  return null;
-}
-
-const MEDIA_HOST_PATTERN = /(?:^|\.)(?:fbcdn\.net|fbsbx\.com)$/i;
-
 function isFacebookMediaHost(hostname) {
-  return MEDIA_HOST_PATTERN.test(String(hostname || ""));
+  return FbExtractor.isFacebookMediaHost(hostname);
 }
 
 /**
  * Validate media stream URL for chrome.downloads.
  */
 function isValidMediaStream(u) {
-  if (!u || typeof u !== "string") return false;
-  let parsed;
-  try {
-    parsed = new URL(u);
-  } catch (_) {
-    return false;
-  }
-  if (parsed.protocol !== "https:") return false;
-  return isFacebookMediaHost(parsed.hostname);
+  return FbExtractor.isValidMediaStream(u);
 }
 
 /**
@@ -675,15 +385,22 @@ async function resolveFacebookVideoUrl(targetUrl, preferredQuality = "HD") {
     if (u && !attempts.includes(u)) attempts.push(u);
   };
 
-  pushAttempt(targetUrl);
-  try {
-    const parsed = new URL(targetUrl);
-    if (/(^|\.)facebook\.com$/i.test(parsed.hostname)) {
-      pushAttempt(`${parsed.protocol}//m.facebook.com${parsed.pathname}${parsed.search}`);
-      pushAttempt(`${parsed.protocol}//mbasic.facebook.com${parsed.pathname}${parsed.search}`);
-      pushAttempt(`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(targetUrl)}&show_text=0`);
-    }
-  } catch (_) {}
+  if (/^\d{6,30}$/.test(targetUrl.trim())) {
+    const numId = targetUrl.trim();
+    pushAttempt(`https://www.facebook.com/reel/${numId}`);
+    pushAttempt(`https://www.facebook.com/watch/?v=${numId}`);
+    pushAttempt(`https://m.facebook.com/reel/${numId}`);
+  } else {
+    pushAttempt(targetUrl);
+    try {
+      const parsed = new URL(targetUrl);
+      if (/(^|\.)facebook\.com$/i.test(parsed.hostname)) {
+        pushAttempt(`${parsed.protocol}//m.facebook.com${parsed.pathname}${parsed.search}`);
+        pushAttempt(`${parsed.protocol}//mbasic.facebook.com${parsed.pathname}${parsed.search}`);
+        pushAttempt(`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(targetUrl)}&show_text=0`);
+      }
+    } catch (_) {}
+  }
 
   for (let i = 0; i < attempts.length; i++) {
     const resolved = await fetchStream(attempts[i], `ssr-attempt ${i + 1}/${attempts.length}`);
@@ -847,18 +564,25 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       : nudgeSources;
 
   // 3. Resolve from the post/page URL via SSR + embed strategies
+  // Proactively resolve if we don't have resolvedUrl, OR if resolvedUrl has no audioUrl:
   if (
-    !resolvedUrl &&
+    (!resolvedUrl || !resolvedAudioUrl) &&
     lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")
   ) {
     const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
     if (streamInfo) {
       if (typeof streamInfo === "string") {
-        resolvedUrl = streamInfo;
+        if (!resolvedUrl) resolvedUrl = streamInfo;
       } else {
-        resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
-        resolvedAudioUrl = streamInfo.audioUrl || null;
-        resolvedDashSeparate = !!streamInfo.isDashSeparate;
+        if (streamInfo.audioUrl) {
+          resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
+          resolvedAudioUrl = streamInfo.audioUrl;
+          resolvedDashSeparate = !!streamInfo.isDashSeparate;
+        } else if (!resolvedUrl) {
+          resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
+          resolvedAudioUrl = streamInfo.audioUrl || null;
+          resolvedDashSeparate = !!streamInfo.isDashSeparate;
+        }
       }
     }
   }
@@ -1097,4 +821,3 @@ if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onChan
     }
   });
 }
-

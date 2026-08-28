@@ -116,9 +116,12 @@
         raw.includes("dash_manifest") ||
         raw.includes("playback_video_dash_xml") ||
         raw.includes("video_dash_manifest") ||
+        raw.includes("dash_prefetch_experimental") ||
+        raw.includes("playable_url_dash") ||
         raw.includes("representations") ||
         raw.includes("BaseURL") ||
         raw.includes(".mp4") ||
+        raw.includes("audio_stream_url") ||
         raw.includes("video_delivery");
 
       if (!hasVideoKeys) continue;
@@ -129,7 +132,7 @@
 
       for (const text of texts) {
         // 1. Match JSON object blocks containing video id
-        const objectRegex = /\{[^{}]*?"(?:video_id|id)"\s*:\s*"?(\d{8,25})"[^{}]*?\}/g;
+        const objectRegex = /\{[^{}]*?"(?:video_id|id|videoId)"\s*:\s*"?(\d{6,30})"[^{}]*?\}/g;
         let match;
 
         while ((match = objectRegex.exec(text)) !== null) {
@@ -141,13 +144,13 @@
           }
         }
 
-        // 2. Broader nested structure matching within ~4000 chars of video ID
-        const broaderRegex = /"(?:video_id|id)"\s*:\s*"(\d{8,25})"[\s\S]{0,4000}?"(?:playable_url_quality_hd|browser_native_hd_url|playable_url|browser_native_sd_url|dash_manifest|playback_video_dash_xml|<BaseURL)"/g;
-        let broaderMatch;
-        while ((broaderMatch = broaderRegex.exec(text)) !== null) {
-          const id = broaderMatch[1];
-          if (!urlsMap.has(id)) {
-            const section = text.substring(broaderMatch.index, Math.min(text.length, broaderMatch.index + 4000));
+        // 2. Broader nested structure matching: videoId followed by stream keys within ~5000 chars
+        const forwardRegex = /"(?:video_id|id|videoId)"\s*:\s*"(\d{6,30})"[\s\S]{0,5000}?"(?:playable_url_quality_hd|browser_native_hd_url|playable_url|browser_native_sd_url|dash_manifest|playback_video_dash_xml|representations|<BaseURL)"/g;
+        let forwardMatch;
+        while ((forwardMatch = forwardRegex.exec(text)) !== null) {
+          const id = forwardMatch[1];
+          if (!urlsMap.has(id) || (!urlsMap.get(id).audioUrl && !urlsMap.get(id).isDashSeparate)) {
+            const section = text.substring(forwardMatch.index, Math.min(text.length, forwardMatch.index + 5000));
             const streams = Extractor.extractStreamsFromText(section);
             if (streams) {
               urlsMap.set(id, streams);
@@ -155,11 +158,37 @@
           }
         }
 
+        // 3. Backward structure matching: stream keys followed by videoId within ~5000 chars
+        const backwardRegex = /"(?:dash_manifest|playback_video_dash_xml|representations)"[\s\S]{0,5000}?"(?:video_id|id|videoId)"\s*:\s*"(\d{6,30})"/g;
+        let backwardMatch;
+        while ((backwardMatch = backwardRegex.exec(text)) !== null) {
+          const id = backwardMatch[1];
+          if (!urlsMap.has(id) || (!urlsMap.get(id).audioUrl && !urlsMap.get(id).isDashSeparate)) {
+            const section = text.substring(backwardMatch.index, Math.min(text.length, backwardMatch.index + 5000));
+            const streams = Extractor.extractStreamsFromText(section);
+            if (streams) {
+              urlsMap.set(id, streams);
+            }
+          }
+        }
       }
     }
 
-    // Removed fallback_any mechanism - it caused cross-Reel contamination
-    // Each video must have exact videoId match to get its stream
+    // Direct page URL mapping if on a standalone Reel page
+    const pageIdMatch = window.location.pathname.match(/\/(?:reel|reels)\/(\d{6,30})/i);
+    if (pageIdMatch && !urlsMap.has(pageIdMatch[1])) {
+      for (const script of scripts) {
+        const raw = script.textContent;
+        if (!raw) continue;
+        if (raw.includes("dash_manifest") || raw.includes("playback_video_dash_xml") || raw.includes("representations")) {
+          const streams = Extractor.extractStreamsFromText(raw);
+          if (streams && (streams.audioUrl || streams.hdUrl || streams.sdUrl)) {
+            urlsMap.set(pageIdMatch[1], streams);
+            break;
+          }
+        }
+      }
+    }
 
     return urlsMap;
   }
