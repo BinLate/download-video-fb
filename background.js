@@ -385,21 +385,35 @@ async function resolveFacebookVideoUrl(targetUrl, preferredQuality = "HD") {
     if (u && !attempts.includes(u)) attempts.push(u);
   };
 
-  if (/^\d{6,30}$/.test(targetUrl.trim())) {
-    const numId = targetUrl.trim();
-    pushAttempt(`https://www.facebook.com/reel/${numId}`);
-    pushAttempt(`https://www.facebook.com/watch/?v=${numId}`);
-    pushAttempt(`https://m.facebook.com/reel/${numId}`);
+  const trimmed = targetUrl.trim();
+  if (/^\d{6,30}$/.test(trimmed)) {
+    pushAttempt(`https://www.facebook.com/reel/${trimmed}`);
+    pushAttempt(`https://www.facebook.com/watch/?v=${trimmed}`);
+    pushAttempt(`https://m.facebook.com/reel/${trimmed}`);
   } else {
-    pushAttempt(targetUrl);
     try {
-      const parsed = new URL(targetUrl);
-      if (/(^|\.)facebook\.com$/i.test(parsed.hostname)) {
-        pushAttempt(`${parsed.protocol}//m.facebook.com${parsed.pathname}${parsed.search}`);
-        pushAttempt(`${parsed.protocol}//mbasic.facebook.com${parsed.pathname}${parsed.search}`);
-        pushAttempt(`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(targetUrl)}&show_text=0`);
+      const parsed = new URL(trimmed);
+      if (/(^|\.)facebook\.com$/i.test(parsed.hostname) || /(^|\.)fb\.watch$/i.test(parsed.hostname)) {
+        const idMatch = parsed.pathname.match(/\/(?:reel|reels|videos|watch)(?:\/[^/]+)*\/(\d{6,30})/i) || parsed.search.match(/[?&]v=(\d{6,30})/);
+        if (idMatch) {
+          const numId = idMatch[1];
+          pushAttempt(`https://www.facebook.com/reel/${numId}`);
+          pushAttempt(`https://www.facebook.com/watch/?v=${numId}`);
+          pushAttempt(`https://m.facebook.com/reel/${numId}`);
+        } else if (parsed.pathname !== "/" && parsed.pathname !== "" && !/^\/(?:reels?|watch)\/?$/i.test(parsed.pathname)) {
+          pushAttempt(trimmed);
+          pushAttempt(`${parsed.protocol}//m.facebook.com${parsed.pathname}${parsed.search}`);
+          pushAttempt(`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(trimmed)}&show_text=0`);
+        } else {
+          // Generic root URL like facebook.com/ or facebook.com/reels/ WITHOUT ID -> DO NOT SSR to avoid grabbing random feed video!
+          return null;
+        }
+      } else {
+        pushAttempt(trimmed);
       }
-    } catch (_) {}
+    } catch (_) {
+      return null;
+    }
   }
 
   for (let i = 0; i < attempts.length; i++) {
@@ -563,26 +577,27 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       ? [selectedSource]
       : nudgeSources;
 
-  // 3. Resolve from the post/page URL via SSR + embed strategies
-  // Proactively resolve if we don't have resolvedUrl, OR if resolvedUrl has no audioUrl:
-  if (
-    (!resolvedUrl || !resolvedAudioUrl) &&
-    lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")
-  ) {
-    const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
-    if (streamInfo) {
-      if (typeof streamInfo === "string") {
-        if (!resolvedUrl) resolvedUrl = streamInfo;
-      } else {
-        if (streamInfo.audioUrl) {
-          resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
-          resolvedAudioUrl = streamInfo.audioUrl;
-          resolvedDashSeparate = !!streamInfo.isDashSeparate;
-        } else if (!resolvedUrl) {
+  // 3. Resolve from the post/page URL via SSR + embed strategies only when needed
+  if (!resolvedUrl) {
+    if (lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")) {
+      const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
+      if (streamInfo) {
+        if (typeof streamInfo === "string") {
+          resolvedUrl = streamInfo;
+        } else {
           resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
           resolvedAudioUrl = streamInfo.audioUrl || null;
           resolvedDashSeparate = !!streamInfo.isDashSeparate;
         }
+      }
+    }
+  } else if (!resolvedAudioUrl && lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")) {
+    // If we already have resolvedUrl from DOM, only query SSR to enrich audio if lookupTarget has a numeric ID
+    if (/\/(?:reel|reels|videos|watch)(?:\/[^/]+)*\/(\d{6,30})/i.test(lookupTarget) || /[?&]v=(\d{6,30})/.test(lookupTarget)) {
+      const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
+      if (streamInfo && typeof streamInfo === "object" && streamInfo.audioUrl) {
+        resolvedAudioUrl = streamInfo.audioUrl;
+        resolvedDashSeparate = true;
       }
     }
   }

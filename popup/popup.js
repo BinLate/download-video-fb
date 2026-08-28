@@ -10,6 +10,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const detectedCountSpan = document.getElementById("detectedCount");
   const videoListContainer = document.getElementById("videoListContainer");
   const btnRescan = document.getElementById("btnRescan");
+  const appVersionTag = document.getElementById("appVersionTag");
+  if (appVersionTag && chrome.runtime?.getManifest) {
+    appVersionTag.textContent = "v" + (chrome.runtime.getManifest().version || "1.2.0");
+  }
   const tabBtns = document.querySelectorAll(".tab-btn");
   const tabContents = document.querySelectorAll(".tab-content");
 

@@ -376,6 +376,32 @@ describe("FbExtractor (lib/extractor.js)", () => {
     assert.equal(FbExtractor.isValidMediaStream("data:video/mp4;base64,AAAA"), false, "Data scheme must be rejected");
     assert.equal(FbExtractor.isValidMediaStream(null), false);
   });
+
+  it("should correctly isolate distinct video streams from multi-video payloads", () => {
+    const video1Payload = JSON.stringify({
+      id: "10001",
+      dash_manifest: String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"1080\" height=\"1920\" bandwidth=\"3000000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/video1_hd.mp4?oe=111<\/BaseURL><\/Representation><\/AdaptationSet><AdaptationSet contentType=\"audio\"><Representation id=\"a1\" mimeType=\"audio/mp4\" bandwidth=\"128000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/a\/audio1.mp4?oe=111<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`
+    });
+
+    const video2Payload = JSON.stringify({
+      id: "20002",
+      dash_manifest: String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v2\" mimeType=\"video/mp4\" width=\"720\" height=\"1280\" bandwidth=\"1500000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/video2_sd.mp4?oe=222<\/BaseURL><\/Representation><\/AdaptationSet><AdaptationSet contentType=\"audio\"><Representation id=\"a2\" mimeType=\"audio/mp4\" bandwidth=\"96000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/a\/audio2.mp4?oe=222<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`
+    });
+
+    const res1 = FbExtractor.extractStreamsFromText(video1Payload);
+    const res2 = FbExtractor.extractStreamsFromText(video2Payload);
+
+    assert.ok(res1, "Video 1 must be extracted");
+    assert.ok(res2, "Video 2 must be extracted");
+    assert.ok(res1.hdUrl.includes("video1_hd.mp4"), "Video 1 must have video1 stream");
+    assert.ok(res1.audioUrl.includes("audio1.mp4"), "Video 1 must have audio1 stream");
+    assert.ok(res2.hdUrl.includes("video2_sd.mp4"), "Video 2 must have video2 stream");
+    assert.ok(res2.audioUrl.includes("audio2.mp4"), "Video 2 must have audio2 stream");
+
+    // Strict non-contamination
+    assert.ok(!res1.hdUrl.includes("video2"), "Video 1 must not contain Video 2 URL");
+    assert.ok(!res2.hdUrl.includes("video1"), "Video 2 must not contain Video 1 URL");
+  });
 });
 
 describe("Stream Budget & Memory Protection (fetchWithBudget)", () => {

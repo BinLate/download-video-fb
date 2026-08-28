@@ -100,7 +100,8 @@
   };
 
   /**
-   * Helper to extract HD and SD URLs from embedded scripts or DOM
+   * Helper to extract HD, SD, and Audio URLs from embedded scripts or DOM.
+   * Parses JSON structures strictly within balanced object boundaries to prevent cross-video contamination.
    */
   function extractUrlsFromScripts() {
     const urlsMap = new Map();
@@ -108,7 +109,7 @@
 
     for (const script of scripts) {
       const raw = script.textContent;
-      if (!raw) continue;
+      if (!raw || raw.length < 30) continue;
 
       const hasVideoKeys =
         raw.includes("playable_url") ||
@@ -126,65 +127,90 @@
 
       if (!hasVideoKeys) continue;
 
-      const texts = new Set([raw]);
+      const texts = [raw];
       const decodedFull = Extractor.decodeFbEscapes(raw);
-      if (decodedFull !== raw) texts.add(decodedFull);
+      if (decodedFull !== raw) texts.push(decodedFull);
 
       for (const text of texts) {
-        // 1. Match JSON object blocks containing video id
-        const objectRegex = /\{[^{}]*?"(?:video_id|id|videoId)"\s*:\s*"?(\d{6,30})"[^{}]*?\}/g;
-        let match;
+        // 1. Direct JSON object pattern: {"id":"123...", ... "dash_manifest":...} or {"video_id":"123...", ...}
+        const streamKeywords = [
+          "dash_manifest",
+          "playback_video_dash_xml",
+          "video_dash_manifest",
+          "representations",
+          "playable_url_quality_hd",
+          "browser_native_hd_url",
+          "playable_url",
+          "browser_native_sd_url",
+          "playable_url_dash"
+        ];
 
-        while ((match = objectRegex.exec(text)) !== null) {
-          const block = match[0];
-          const videoId = match[1];
-          const streams = Extractor.extractStreamsFromText(block);
-          if (streams) {
-            urlsMap.set(videoId, streams);
-          }
-        }
+        for (const kw of streamKeywords) {
+          let kwIdx = 0;
+          while ((kwIdx = text.indexOf(`"${kw}"`, kwIdx)) !== -1) {
+            // Find enclosing balanced JSON block bounds around this keyword
+            const scanStart = Math.max(0, kwIdx - 3000);
+            const prefix = text.substring(scanStart, kwIdx);
 
-        // 2. Broader nested structure matching: videoId followed by stream keys within ~5000 chars
-        const forwardRegex = /"(?:video_id|id|videoId)"\s*:\s*"(\d{6,30})"[\s\S]{0,5000}?"(?:playable_url_quality_hd|browser_native_hd_url|playable_url|browser_native_sd_url|dash_manifest|playback_video_dash_xml|representations|<BaseURL)"/g;
-        let forwardMatch;
-        while ((forwardMatch = forwardRegex.exec(text)) !== null) {
-          const id = forwardMatch[1];
-          if (!urlsMap.has(id) || (!urlsMap.get(id).audioUrl && !urlsMap.get(id).isDashSeparate)) {
-            const section = text.substring(forwardMatch.index, Math.min(text.length, forwardMatch.index + 5000));
-            const streams = Extractor.extractStreamsFromText(section);
-            if (streams) {
-              urlsMap.set(id, streams);
+            // Find candidate opening braces before the keyword
+            const openBraces = [];
+            for (let i = 0; i < prefix.length; i++) {
+              if (prefix[i] === "{") openBraces.push(scanStart + i);
             }
-          }
-        }
 
-        // 3. Backward structure matching: stream keys followed by videoId within ~5000 chars
-        const backwardRegex = /"(?:dash_manifest|playback_video_dash_xml|representations)"[\s\S]{0,5000}?"(?:video_id|id|videoId)"\s*:\s*"(\d{6,30})"/g;
-        let backwardMatch;
-        while ((backwardMatch = backwardRegex.exec(text)) !== null) {
-          const id = backwardMatch[1];
-          if (!urlsMap.has(id) || (!urlsMap.get(id).audioUrl && !urlsMap.get(id).isDashSeparate)) {
-            const section = text.substring(backwardMatch.index, Math.min(text.length, backwardMatch.index + 5000));
-            const streams = Extractor.extractStreamsFromText(section);
-            if (streams) {
-              urlsMap.set(id, streams);
+            // Try matching from the closest opening braces outward
+            for (let b = openBraces.length - 1; b >= 0; b--) {
+              const startPos = openBraces[b];
+              let depth = 0;
+              let inString = false;
+              let escaped = false;
+              let endPos = -1;
+              const maxSearch = Math.min(text.length, startPos + 18000);
+
+              for (let i = startPos; i < maxSearch; i++) {
+                const char = text[i];
+                if (escaped) {
+                  escaped = false;
+                  continue;
+                }
+                if (char === "\\") {
+                  escaped = true;
+                  continue;
+                }
+                if (char === '"') {
+                  inString = !inString;
+                  continue;
+                }
+                if (!inString) {
+                  if (char === "{") depth++;
+                  else if (char === "}") {
+                    depth--;
+                    if (depth === 0) {
+                      endPos = i + 1;
+                      break;
+                    }
+                  }
+                }
+              }
+
+              if (endPos > kwIdx) {
+                const block = text.substring(startPos, endPos);
+                // Search for authoritative numeric videoId inside this balanced block
+                const idMatch = block.match(/"(?:video_id|id|videoId)"\s*:\s*"?(\d{6,30})"?/);
+                if (idMatch) {
+                  const videoId = idMatch[1];
+                  const streams = Extractor.extractStreamsFromText(block);
+                  if (streams && (streams.hdUrl || streams.sdUrl || streams.audioUrl)) {
+                    if (!urlsMap.has(videoId) || (streams.audioUrl && !urlsMap.get(videoId).audioUrl)) {
+                      urlsMap.set(videoId, streams);
+                    }
+                  }
+                }
+                break; // Found matching enclosing block
+              }
             }
-          }
-        }
-      }
-    }
 
-    // Direct page URL mapping if on a standalone Reel page
-    const pageIdMatch = window.location.pathname.match(/\/(?:reel|reels)\/(\d{6,30})/i);
-    if (pageIdMatch && !urlsMap.has(pageIdMatch[1])) {
-      for (const script of scripts) {
-        const raw = script.textContent;
-        if (!raw) continue;
-        if (raw.includes("dash_manifest") || raw.includes("playback_video_dash_xml") || raw.includes("representations")) {
-          const streams = Extractor.extractStreamsFromText(raw);
-          if (streams && (streams.audioUrl || streams.hdUrl || streams.sdUrl)) {
-            urlsMap.set(pageIdMatch[1], streams);
-            break;
+            kwIdx += kw.length + 2;
           }
         }
       }
@@ -475,8 +501,10 @@
           url: downloadUrl,
           audioUrl: audioUrl,
           isDashSeparate: isDashSeparate,
-          postUrl: videoInfo.postLink || window.location.href,
-          videoId: videoInfo.videoId,
+          postUrl: (videoInfo.postLink && !/facebook\.com\/(?:reels?|watch)?\/?$/i.test(videoInfo.postLink))
+            ? videoInfo.postLink
+            : (authoritativeVideoId ? `https://www.facebook.com/reel/${authoritativeVideoId}` : null),
+          videoId: authoritativeVideoId,
           selectedSource:
             videoInfo.url && !videoInfo.url.startsWith("blob:")
               ? videoInfo.url
