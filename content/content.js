@@ -96,7 +96,14 @@
     },
     parseDashManifest: function () { return null; },
     extractStreamsFromText: function () { return null; },
-    isValidMediaStream: function () { return true; }
+    isValidMediaStream: function () { return true; },
+    isDedicatedSingleVideoPage: function (path, search) {
+      if (/^\/(?:reel|reels)\/\d{6,30}\/?$/i.test(path || "")) return true;
+      if (/^\/share\/r\/[^/]+\/?$/i.test(path || "")) return true;
+      if (/^\/videos\/(?:[^/]+\/)?\d{6,30}\/?$/i.test(path || "")) return true;
+      if (/^\/watch\/?$/i.test(path || "") && /[?&]v=\d{6,30}/i.test(search || "")) return true;
+      return false;
+    }
   };
 
   /**
@@ -357,7 +364,7 @@
     } else if (
       !streamMatch &&
       scriptUrls.size === 1 &&
-      (window.location.pathname.includes("/reel/") || window.location.pathname.includes("/watch") || window.location.pathname.includes("/share/r/"))
+      Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)
     ) {
       // Dedicated single-video page: safe to use the single parsed stream configuration
       streamMatch = scriptUrls.values().next().value;

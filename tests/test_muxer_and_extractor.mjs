@@ -1495,4 +1495,23 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     assert.ok(stream.audioUrl.includes("a_direct.mp4"), "Audio URL matches");
     assert.equal(stream.isDashSeparate, true, "Is DASH separate");
   });
+
+  // ---------- Test 15: isDedicatedSingleVideoPage URL classification ----------
+  it("T15: isDedicatedSingleVideoPage correctly identifies dedicated single-video URLs vs multi-video feeds", () => {
+    // True cases (Dedicated Single Video)
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/reel/123456789012", ""), true);
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/reels/123456789012/", ""), true);
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/share/r/abc123XYZ/", ""), true);
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/videos/123456789012/", ""), true);
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/watch/", "?v=123456789012"), true);
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/watch", "?ref=search&v=123456789012"), true);
+
+    // False cases (Generic Multi-Video Feeds)
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/watch", ""), false, "Generic /watch without ?v= must be false");
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/watch/", ""), false, "Generic /watch/ without ?v= must be false");
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/reels", ""), false, "Generic /reels feed must be false");
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/reels/", ""), false, "Generic /reels/ feed must be false");
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/reel", ""), false, "Generic /reel feed must be false");
+    assert.equal(FbExtractor.isDedicatedSingleVideoPage("/", ""), false, "Home feed must be false");
+  });
 });
