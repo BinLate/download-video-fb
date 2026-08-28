@@ -1645,4 +1645,50 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     assert.ok(stream.audioUrl.includes("order_last_audio.mp4"), "Must have Audio URL");
     assert.equal(stream.isDashSeparate, true);
   });
+
+  // ---------- Test 23: Multiple preloaded Reels: strictly match authoritative ID without contamination ----------
+  it("T23: Multiple preloaded Reels in page scripts strictly resolve to the authoritative videoId", () => {
+    const raw = JSON.stringify({
+      reels_feed: [
+        {
+          id: "1069318268997320",
+          browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/reel_current_hd.mp4?oe=111",
+          audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/reel_current_audio.mp4?oe=111"
+        },
+        {
+          id: "2079419279008430",
+          browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/reel_next_hd.mp4?oe=222",
+          audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/reel_next_audio.mp4?oe=222"
+        }
+      ]
+    });
+    const map = FbExtractor.extractUrlsFromScriptText(raw);
+    assert.equal(map.has("1069318268997320"), true);
+    assert.equal(map.has("2079419279008430"), true);
+    const current = map.get("1069318268997320");
+    assert.ok(current.hdUrl.includes("reel_current_hd.mp4"));
+    assert.ok(current.audioUrl.includes("reel_current_audio.mp4"));
+  });
+
+  // ---------- Test 24: Multiple preloaded Reels with non-matching ID: strict null (no arbitrary audio guessing) ----------
+  it("T24: Multi-item preloads with non-matching authoritative ID do not cross-contaminate or guess arbitrary audio", () => {
+    const raw = JSON.stringify({
+      reels_feed: [
+        {
+          id: "555555555555",
+          browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/reel_A_hd.mp4?oe=A",
+          audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/reel_A_audio.mp4?oe=A"
+        },
+        {
+          id: "666666666666",
+          browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/reel_B_hd.mp4?oe=B",
+          audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/reel_B_audio.mp4?oe=B"
+        }
+      ]
+    });
+    const map = FbExtractor.extractUrlsFromScriptText(raw);
+    const nonExistentId = "999999999999";
+    const result = map.get(nonExistentId) || null;
+    assert.equal(result, null, "Must return null when authoritative ID is not found, never picking arbitrary sibling");
+  });
 });

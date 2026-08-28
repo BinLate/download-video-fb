@@ -17,7 +17,7 @@ try {
   }
 }
 
-const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.12";
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.13";
 console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
 
 const tabVideosMap = new Map();
@@ -582,10 +582,10 @@ function truncateUrlForLog(u) {
  *   Tier 2: Fall back to progressive MP4 (already contains audio)
  *   Tier 3: Video-only with explicit warning
  */
-async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false, isDash = false, isProgressive = false, progressiveHdUrl = null, progressiveSdUrl = null, postUrl, tabId, type = "video", title = "facebook", quality = "HD", selectedSource = null }) {
+async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false, isDash = false, isProgressive = false, progressiveHdUrl = null, progressiveSdUrl = null, postUrl = null, videoId = null, tabId = null, type = "video", title = "facebook", quality = "HD", selectedSource = null }) {
   const diag = {
     version: EXT_VERSION,
-    videoId: null,
+    videoId: videoId,
     videoUrl: null,
     audioUrl: null,
     isProgressive: false,
@@ -621,8 +621,9 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
   if ((!resolvedUrl || !resolvedAudioUrl) && typeof tabId === "number" && tabId >= 0) {
     try {
       const liveStreams = await new Promise((res) => {
-        chrome.tabs.sendMessage(tabId, { action: "GET_LIVE_PAGE_STREAMS", videoId }, (resp) => {
+        chrome.tabs.sendMessage(tabId, { action: "GET_LIVE_PAGE_STREAMS", videoId: videoId || lookupTarget }, (resp) => {
           if (chrome.runtime.lastError) {
+            console.log(`[Download Video FB] v${EXT_VERSION} GET_LIVE_PAGE_STREAMS notice:`, chrome.runtime.lastError.message);
             res(null);
           } else {
             res(resp?.streams || null);
@@ -648,7 +649,9 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
         if (liveStreams.progressiveSdUrl) resolvedProgressiveSd = liveStreams.progressiveSdUrl;
         if (liveStreams.isProgressive) resolvedProgressive = true;
       }
-    } catch (_) {}
+    } catch (tabErr) {
+      console.warn(`[Download Video FB] v${EXT_VERSION} Live tab stream query error:`, tabErr && tabErr.message ? tabErr.message : tabErr);
+    }
   }
 
   // 3. Nudge the tab to re-scan

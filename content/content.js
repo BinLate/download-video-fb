@@ -148,44 +148,15 @@
     const scriptUrls = extractUrlsFromScripts();
     let streamMatch = null;
 
-    if (authoritativeVideoId && scriptUrls.has(authoritativeVideoId)) {
+    if (authoritativeVideoId && isNumericFacebookId(authoritativeVideoId) && scriptUrls.has(authoritativeVideoId)) {
       streamMatch = scriptUrls.get(authoritativeVideoId);
     } else if (
-      !streamMatch &&
-      scriptUrls.size > 0 &&
+      !authoritativeVideoId &&
+      scriptUrls.size === 1 &&
       Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)
     ) {
-      streamMatch = (authoritativeVideoId && scriptUrls.get(authoritativeVideoId)) ||
-                    Array.from(scriptUrls.values()).find(s => s.audioUrl) ||
-                    scriptUrls.values().next().value;
-    }
-
-    if (!streamMatch) {
-      const allScripts = document.querySelectorAll("script");
-      for (const s of allScripts) {
-        const raw = s.textContent;
-        if (!raw || raw.length < 50) continue;
-        if (authoritativeVideoId && raw.includes(authoritativeVideoId)) {
-          const parsed = Extractor.extractStreamsFromText(raw);
-          if (parsed && (parsed.hdUrl || parsed.sdUrl)) {
-            streamMatch = parsed;
-            if (parsed.audioUrl) break;
-          }
-        }
-      }
-      if (!streamMatch && Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)) {
-        for (const s of allScripts) {
-          const raw = s.textContent;
-          if (!raw || raw.length < 50) continue;
-          if (raw.includes("dash_manifest") || raw.includes("playback_video_dash_xml") || raw.includes("audio_stream_url")) {
-            const parsed = Extractor.extractStreamsFromText(raw);
-            if (parsed && (parsed.hdUrl || parsed.sdUrl)) {
-              streamMatch = parsed;
-              if (parsed.audioUrl) break;
-            }
-          }
-        }
-      }
+      // Dedicated single-video page without an explicit DOM ID: safe only if there is exactly 1 media configuration
+      streamMatch = scriptUrls.values().next().value;
     }
 
     return streamMatch;
