@@ -17,7 +17,7 @@ try {
   }
 }
 
-const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.13";
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.14";
 console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
 
 const tabVideosMap = new Map();
@@ -621,7 +621,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
   if ((!resolvedUrl || !resolvedAudioUrl) && typeof tabId === "number" && tabId >= 0) {
     try {
       const liveStreams = await new Promise((res) => {
-        chrome.tabs.sendMessage(tabId, { action: "GET_LIVE_PAGE_STREAMS", videoId: videoId || lookupTarget }, (resp) => {
+        chrome.tabs.sendMessage(tabId, { action: "GET_LIVE_PAGE_STREAMS", videoId: isNumericFacebookId(videoId) ? videoId : null, pageUrl: lookupTarget }, (resp) => {
           if (chrome.runtime.lastError) {
             console.log(`[Download Video FB] v${EXT_VERSION} GET_LIVE_PAGE_STREAMS notice:`, chrome.runtime.lastError.message);
             res(null);

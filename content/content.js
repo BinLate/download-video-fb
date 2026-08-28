@@ -592,7 +592,11 @@
           sendResponse({ status: "no_video" });
         }
       } else if (request.action === "GET_LIVE_PAGE_STREAMS") {
-        const targetId = request.videoId || extractVideoId(null, document.querySelector("video"));
+        const suppliedId = isNumericFacebookId(request.videoId) ? request.videoId.trim() : null;
+        const urlId = !suppliedId && request.pageUrl ? extractVideoId(request.pageUrl, null) : null;
+        const domId = !suppliedId && !urlId ? extractVideoId(null, document.querySelector("video")) : null;
+        const targetId = suppliedId || urlId || domId || null;
+
         const liveStreams = findLivePageStreams(targetId);
         sendResponse({ success: true, streams: liveStreams });
       }

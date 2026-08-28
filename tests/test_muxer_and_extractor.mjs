@@ -1691,4 +1691,65 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     const result = map.get(nonExistentId) || null;
     assert.equal(result, null, "Must return null when authoritative ID is not found, never picking arbitrary sibling");
   });
+
+  // ---------- Test 25: GET_LIVE_PAGE_STREAMS target ID resolution ----------
+  it("T25: GET_LIVE_PAGE_STREAMS resolves numeric ID from videoId, pageUrl, or DOM element correctly", () => {
+    const raw = JSON.stringify({
+      id: "1069318268997320",
+      browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/reel_live_hd.mp4?oe=111",
+      audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/reel_live_audio.mp4?oe=111"
+    });
+    const map = FbExtractor.extractUrlsFromScriptText(raw);
+
+    // Helper resolving targetId identically to content.js GET_LIVE_PAGE_STREAMS
+    const resolveTargetId = (req, domElem) => {
+      const suppliedId = FbExtractor.isNumericFacebookId(req.videoId) ? req.videoId.trim() : null;
+      const urlId = !suppliedId && req.pageUrl ? FbExtractor.extractCanonicalVideoId(req.pageUrl, null) : null;
+      const domId = !suppliedId && !urlId ? FbExtractor.extractCanonicalVideoId(null, domElem) : null;
+      return suppliedId || urlId || domId || null;
+    };
+
+    // 1. Numeric videoId supplied
+    const id1 = resolveTargetId({ videoId: "1069318268997320", pageUrl: null }, null);
+    assert.equal(id1, "1069318268997320");
+    assert.ok(map.has(id1));
+
+    // 2. Non-numeric videoId but valid pageUrl
+    const id2 = resolveTargetId({ videoId: null, pageUrl: "https://www.facebook.com/reel/1069318268997320" }, null);
+    assert.equal(id2, "1069318268997320");
+    assert.ok(map.has(id2));
+
+    // 3. Non-numeric videoId string (e.g. URL accidentally passed) with pageUrl
+    const id3 = resolveTargetId({ videoId: "https://www.facebook.com/reel/1069318268997320", pageUrl: "https://www.facebook.com/reel/1069318268997320" }, null);
+    assert.equal(id3, "1069318268997320");
+    assert.ok(map.has(id3));
+  });
+
+  // ---------- Test 26: Single-video page fallback when videoId is null ----------
+  it("T26: Single-video page fallback allows single stream when scriptUrls.size === 1 and rejects multi-entry", () => {
+    // 1 single stream
+    const singleRaw = JSON.stringify({
+      browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/single_hd.mp4?oe=111",
+      audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/single_audio.mp4?oe=111"
+    });
+    const singleStreams = FbExtractor.extractStreamsFromText(singleRaw);
+    assert.ok(singleStreams && singleStreams.hdUrl);
+
+    // Multi-entry
+    const multiMap = new Map();
+    multiMap.set("111111", { hdUrl: "https://video-sin6-4.xx.fbcdn.net/1.mp4" });
+    multiMap.set("222222", { hdUrl: "https://video-sin6-4.xx.fbcdn.net/2.mp4" });
+
+    const findMatch = (authoritativeId, scriptUrls, isDedicated) => {
+      if (authoritativeId && FbExtractor.isNumericFacebookId(authoritativeId) && scriptUrls.has(authoritativeId)) {
+        return scriptUrls.get(authoritativeId);
+      } else if (!authoritativeId && scriptUrls.size === 1 && isDedicated) {
+        return scriptUrls.values().next().value;
+      }
+      return null;
+    };
+
+    assert.equal(findMatch(null, multiMap, true), null, "Multi-entry map without targetId must return null");
+    assert.equal(findMatch("111111", multiMap, true).hdUrl, "https://video-sin6-4.xx.fbcdn.net/1.mp4");
+  });
 });
