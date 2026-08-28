@@ -1596,4 +1596,19 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     assert.ok(s1.audioUrl.includes("sibling1_audio.mp4"), "Sibling 1 has its own audio");
     assert.equal(s2.audioUrl, null, "Sibling 2 must NOT receive Sibling 1's audio");
   });
+
+  // ---------- Test 20: Recognized parent with ID but no direct streams receives NO stream from nested child ----------
+  it("T20: Recognized parent video container with ID but no direct streams receives NO stream from nested child", () => {
+    const raw = JSON.stringify({
+      video: {
+        id: "777777777777",
+        related_media: {
+          browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/child_video.mp4?oe=9",
+          audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/child_audio.mp4?oe=10"
+        }
+      }
+    });
+    const map = FbExtractor.extractUrlsFromScriptText(raw);
+    assert.equal(map.has("777777777777"), false, "Parent video container must NOT receive streams from nested child without direct streams");
+  });
 });
