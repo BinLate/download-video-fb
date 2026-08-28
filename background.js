@@ -709,26 +709,32 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
     }
 
     // ========================================================================
-    // TIER 3: Download whatever we have — but warn if it may be silent
+    // TIER 3: Download whatever we have — but BLOCK silent video-only downloads
     // ========================================================================
     if (resolvedProgressive) {
-      // Progressive MP4 — probably has audio embedded
+      // Progressive MP4 — already has audio embedded, safe to download
       diag.fallbackUsed = "progressive_original";
       diag.hasAudioTrack = true;
-      console.log(`[Download Video FB] v${EXT_VERSION} Tier 3: Progressive download (likely has audio)`);
-    } else {
-      // DASH video-only — warn the user
-      diag.fallbackUsed = "video_only";
-      diag.hasAudioTrack = false;
-      console.warn(`[Download Video FB] v${EXT_VERSION} Tier 3: Downloading video-only stream (NO audio). No progressive fallback available.`);
+      console.log(`[Download Video FB] v${EXT_VERSION} Tier 3: Progressive download (has embedded audio)`);
+      console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
+      return await downloadMedia({
+        url: resolvedUrl,
+        isInternalBlob: false,
+        type, title, quality
+      });
     }
 
+    // DASH video-only stream with no audio and no progressive fallback
+    // — refuse to silently deliver a mute file to the user.
+    diag.fallbackUsed = "blocked_video_only";
+    diag.hasAudioTrack = false;
+    console.error(`[Download Video FB] v${EXT_VERSION} Tier 3 BLOCKED: Video-only DASH stream with no audio and no progressive fallback.`);
     console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
-    return await downloadMedia({
-      url: resolvedUrl,
-      isInternalBlob: false,
-      type, title, quality
-    });
+    throw new Error(
+      "Không thể tải video có âm thanh. Video này sử dụng luồng DASH riêng biệt " +
+      "nhưng không tìm được luồng âm thanh hoặc phiên bản MP4 đầy đủ. " +
+      "Hãy phát video vài giây rồi thử tải lại."
+    );
   } finally {
     if (captureSessionId !== null) disarmCaptureSession(tabId, captureSessionId);
   }
