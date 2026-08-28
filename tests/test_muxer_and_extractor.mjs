@@ -475,6 +475,24 @@ describe("FbExtractor (lib/extractor.js)", () => {
     // Ensure non-numeric or unrelated comment IDs were NOT mapped as video IDs
     assert.equal(map.has("post_comment_id_111"), false, "Comment ID must not be mapped as video");
   });
+
+  it("should extract stream when ID is separated from nested stream by more than 4KB of metadata", () => {
+    const largePadding = "x".repeat(6000);
+    const largeScript = JSON.stringify({
+      id: "778899001122",
+      __typename: "Video",
+      filler_metadata: largePadding,
+      video: {
+        dash_manifest: String.raw`<MPD><Period><AdaptationSet contentType=\"video\"><Representation id=\"v1\" mimeType=\"video/mp4\" width=\"1080\" height=\"1920\" bandwidth=\"3000000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/v\/large_gap_hd.mp4?oe=999<\/BaseURL><\/Representation><\/AdaptationSet><AdaptationSet contentType=\"audio\"><Representation id=\"a1\" mimeType=\"audio/mp4\" bandwidth=\"128000\"><BaseURL>https:\/\/video-sin6-4.xx.fbcdn.net\/o1\/a\/large_gap_audio.mp4?oe=999<\/BaseURL><\/Representation><\/AdaptationSet><\/Period><\/MPD>`
+      }
+    });
+
+    const map = FbExtractor.extractUrlsFromScriptText(largeScript);
+    assert.ok(map.has("778899001122"), "Must extract ID separated by >4KB metadata");
+    const stream = map.get("778899001122");
+    assert.ok(stream.hdUrl.includes("large_gap_hd.mp4"));
+    assert.ok(stream.audioUrl.includes("large_gap_audio.mp4"));
+  });
 });
 
 describe("Stream Budget & Memory Protection (fetchWithBudget)", () => {
