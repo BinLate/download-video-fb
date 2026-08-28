@@ -500,13 +500,30 @@
       let matchedSd = null;
       let matchedAudio = null;
       let matchedDashSeparate = false;
+      let matchedIsDash = false;
+      let matchedIsProgressive = false;
+      let matchedProgHd = null;
+      let matchedProgSd = null;
 
+      let entry = null;
       if (info.videoId && scriptData.has(info.videoId)) {
-        const entry = scriptData.get(info.videoId);
+        entry = scriptData.get(info.videoId);
+      } else if (
+        scriptData.size === 1 &&
+        Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)
+      ) {
+        entry = scriptData.values().next().value;
+      }
+
+      if (entry) {
         matchedHd = entry.hdUrl;
         matchedSd = entry.sdUrl;
         matchedAudio = entry.audioUrl || null;
         matchedDashSeparate = Boolean(entry.isDashSeparate);
+        matchedIsDash = Boolean(entry.isDash);
+        matchedIsProgressive = Boolean(entry.isProgressive);
+        matchedProgHd = entry.progressiveHdUrl || null;
+        matchedProgSd = entry.progressiveSdUrl || null;
       }
 
       detectedVideos.set(info.id, {
@@ -520,6 +537,10 @@
         sdUrl: matchedSd,
         audioUrl: matchedAudio,
         isDashSeparate: matchedDashSeparate,
+        isDash: matchedIsDash,
+        isProgressive: matchedIsProgressive,
+        progressiveHdUrl: matchedProgHd,
+        progressiveSdUrl: matchedProgSd,
         isBlob: info.isBlob,
         postLink: info.postLink
       });

@@ -1516,4 +1516,19 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     assert.equal(FbExtractor.isDedicatedSingleVideoPage("/reel", ""), false, "Generic /reel feed must be false");
     assert.equal(FbExtractor.isDedicatedSingleVideoPage("/", ""), false, "Home feed must be false");
   });
+
+  // ---------- Test 16: Paired progressive video + separate audio_stream_url ----------
+  it("T16: extractStreamsFromText extracts paired audioUrl and flags DASH muxing when browser_native_hd_url and audio_stream_url coexist", () => {
+    const raw = JSON.stringify({
+      browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/v_prog_dash.mp4?oe=11",
+      audio_stream_url: "https://video-sin6-4.xx.fbcdn.net/a_prog_dash.mp4?oe=22"
+    });
+    const result = FbExtractor.extractStreamsFromText(raw);
+    assert.ok(result, "Should parse stream info");
+    assert.ok(result.hdUrl.includes("v_prog_dash.mp4"), "HD URL is present");
+    assert.ok(result.audioUrl.includes("a_prog_dash.mp4"), "Audio URL is paired");
+    assert.equal(result.isDashSeparate, true, "isDashSeparate is true");
+    assert.equal(result.isDash, true, "isDash is true");
+    assert.equal(result.isProgressive, false, "isProgressive is false (needs muxing)");
+  });
 });
