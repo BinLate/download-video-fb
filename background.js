@@ -17,7 +17,7 @@ try {
   }
 }
 
-const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.11";
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.12";
 console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
 
 const tabVideosMap = new Map();
@@ -617,7 +617,41 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
 
   const lookupTarget = postUrl || url;
 
-  // 2. Nudge the tab to re-scan
+  // 2. Query the live active tab context for real-time video + audio stream pairs
+  if ((!resolvedUrl || !resolvedAudioUrl) && typeof tabId === "number" && tabId >= 0) {
+    try {
+      const liveStreams = await new Promise((res) => {
+        chrome.tabs.sendMessage(tabId, { action: "GET_LIVE_PAGE_STREAMS", videoId }, (resp) => {
+          if (chrome.runtime.lastError) {
+            res(null);
+          } else {
+            res(resp?.streams || null);
+          }
+        });
+      });
+      if (liveStreams && typeof liveStreams === "object") {
+        if (liveStreams.audioUrl) {
+          resolvedAudioUrl = liveStreams.audioUrl;
+          resolvedDashSeparate = true;
+          resolvedIsDash = true;
+          if (quality === "HD" && liveStreams.hdUrl) {
+            resolvedUrl = liveStreams.hdUrl;
+          } else if (liveStreams.sdUrl) {
+            resolvedUrl = liveStreams.sdUrl;
+          } else if (liveStreams.hdUrl) {
+            resolvedUrl = liveStreams.hdUrl;
+          }
+        } else if (!resolvedUrl) {
+          resolvedUrl = (quality === "HD" && liveStreams.hdUrl) ? liveStreams.hdUrl : (liveStreams.sdUrl || liveStreams.hdUrl);
+        }
+        if (liveStreams.progressiveHdUrl) resolvedProgressiveHd = liveStreams.progressiveHdUrl;
+        if (liveStreams.progressiveSdUrl) resolvedProgressiveSd = liveStreams.progressiveSdUrl;
+        if (liveStreams.isProgressive) resolvedProgressive = true;
+      }
+    } catch (_) {}
+  }
+
+  // 3. Nudge the tab to re-scan
   let nudgeSources = [];
   if (captureSessionId !== null && !resolvedUrl) {
     const nudge = await nudgeAndAwaitCapture(tabId);
@@ -629,7 +663,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       ? [selectedSource]
       : nudgeSources;
 
-  // 3. Resolve from the post/page URL via SSR + embed strategies
+  // 4. Resolve from the post/page URL via SSR + embed strategies
   if (!resolvedUrl) {
     if (lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")) {
       const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
@@ -649,7 +683,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       }
     }
   } else if (!resolvedAudioUrl && lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")) {
-    // Always attempt SSR audio enrichment when audioUrl is missing, regardless of URL format
+    // Attempt SSR audio enrichment when audioUrl is missing
     const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
     if (streamInfo && typeof streamInfo === "object") {
       fullStreamInfo = streamInfo;

@@ -121,7 +121,7 @@
    */
   function extractUrlsFromScripts() {
     const urlsMap = new Map();
-    const scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
+    const scripts = document.querySelectorAll('script');
 
     for (const script of scripts) {
       const raw = script.textContent;
@@ -129,15 +129,66 @@
 
       const subMap = Extractor.extractUrlsFromScriptText(raw);
       if (subMap && typeof subMap.forEach === "function") {
-        subMap.forEach((streams, videoId) => {
-          if (!urlsMap.has(videoId) || (streams.audioUrl && !urlsMap.get(videoId).audioUrl)) {
-            urlsMap.set(videoId, streams);
+        subMap.forEach((streamInfo, videoId) => {
+          if (videoId && isNumericFacebookId(videoId)) {
+            if (!urlsMap.has(videoId) || (streamInfo.audioUrl && !urlsMap.get(videoId).audioUrl)) {
+              urlsMap.set(videoId, streamInfo);
+            }
           }
         });
       }
     }
-
     return urlsMap;
+  }
+
+  /**
+   * Helper to find live page stream information from all available page sources
+   */
+  function findLivePageStreams(authoritativeVideoId) {
+    const scriptUrls = extractUrlsFromScripts();
+    let streamMatch = null;
+
+    if (authoritativeVideoId && scriptUrls.has(authoritativeVideoId)) {
+      streamMatch = scriptUrls.get(authoritativeVideoId);
+    } else if (
+      !streamMatch &&
+      scriptUrls.size > 0 &&
+      Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)
+    ) {
+      streamMatch = (authoritativeVideoId && scriptUrls.get(authoritativeVideoId)) ||
+                    Array.from(scriptUrls.values()).find(s => s.audioUrl) ||
+                    scriptUrls.values().next().value;
+    }
+
+    if (!streamMatch) {
+      const allScripts = document.querySelectorAll("script");
+      for (const s of allScripts) {
+        const raw = s.textContent;
+        if (!raw || raw.length < 50) continue;
+        if (authoritativeVideoId && raw.includes(authoritativeVideoId)) {
+          const parsed = Extractor.extractStreamsFromText(raw);
+          if (parsed && (parsed.hdUrl || parsed.sdUrl)) {
+            streamMatch = parsed;
+            if (parsed.audioUrl) break;
+          }
+        }
+      }
+      if (!streamMatch && Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)) {
+        for (const s of allScripts) {
+          const raw = s.textContent;
+          if (!raw || raw.length < 50) continue;
+          if (raw.includes("dash_manifest") || raw.includes("playback_video_dash_xml") || raw.includes("audio_stream_url")) {
+            const parsed = Extractor.extractStreamsFromText(raw);
+            if (parsed && (parsed.hdUrl || parsed.sdUrl)) {
+              streamMatch = parsed;
+              if (parsed.audioUrl) break;
+            }
+          }
+        }
+      }
+    }
+
+    return streamMatch;
   }
 
   /**
@@ -367,17 +418,7 @@
       }
     }
 
-    let streamMatch = null;
-    if (authoritativeVideoId && scriptUrls.has(authoritativeVideoId)) {
-      streamMatch = scriptUrls.get(authoritativeVideoId);
-    } else if (
-      !streamMatch &&
-      scriptUrls.size === 1 &&
-      Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)
-    ) {
-      // Dedicated single-video page: safe to use the single parsed stream configuration
-      streamMatch = scriptUrls.values().next().value;
-    }
+    let streamMatch = findLivePageStreams(authoritativeVideoId);
 
     let isProgressive = false;
     let isDash = false;
@@ -579,6 +620,10 @@
           showToast("Không tìm thấy video nào trên trang này.");
           sendResponse({ status: "no_video" });
         }
+      } else if (request.action === "GET_LIVE_PAGE_STREAMS") {
+        const targetId = request.videoId || extractVideoId(null, document.querySelector("video"));
+        const liveStreams = findLivePageStreams(targetId);
+        sendResponse({ success: true, streams: liveStreams });
       }
     });
   }
