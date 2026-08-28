@@ -570,13 +570,14 @@ function truncateUrlForLog(u) {
  *   Tier 2: Fall back to progressive MP4 (already contains audio)
  *   Tier 3: Video-only with explicit warning
  */
-async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false, isProgressive = false, progressiveHdUrl = null, progressiveSdUrl = null, postUrl, tabId, type = "video", title = "facebook", quality = "HD", selectedSource = null }) {
+async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false, isDash = false, isProgressive = false, progressiveHdUrl = null, progressiveSdUrl = null, postUrl, tabId, type = "video", title = "facebook", quality = "HD", selectedSource = null }) {
   const diag = {
     version: EXT_VERSION,
     videoId: null,
     videoUrl: null,
     audioUrl: null,
     isProgressive: false,
+    isDash: false,
     videoBytes: 0,
     audioBytes: 0,
     outputBytes: 0,
@@ -589,6 +590,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
   let resolvedUrl = null;
   let resolvedAudioUrl = audioUrl;
   let resolvedDashSeparate = isDashSeparate;
+  let resolvedIsDash = isDash;
   let resolvedProgressive = isProgressive;
   let resolvedProgressiveHd = progressiveHdUrl;
   let resolvedProgressiveSd = progressiveSdUrl;
@@ -627,6 +629,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
           resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
           resolvedAudioUrl = streamInfo.audioUrl || null;
           resolvedDashSeparate = !!streamInfo.isDashSeparate;
+          resolvedIsDash = !!streamInfo.isDash;
           resolvedProgressive = !!streamInfo.isProgressive;
           resolvedProgressiveHd = streamInfo.progressiveHdUrl || resolvedProgressiveHd;
           resolvedProgressiveSd = streamInfo.progressiveSdUrl || resolvedProgressiveSd;
@@ -642,6 +645,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
         resolvedAudioUrl = streamInfo.audioUrl;
         resolvedDashSeparate = true;
       }
+      if (streamInfo.isDash) resolvedIsDash = true;
       // Always capture progressive fallback URLs from SSR
       if (!resolvedProgressiveHd) resolvedProgressiveHd = streamInfo.progressiveHdUrl || null;
       if (!resolvedProgressiveSd) resolvedProgressiveSd = streamInfo.progressiveSdUrl || null;
@@ -651,6 +655,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
   diag.videoUrl = truncateUrlForLog(resolvedUrl);
   diag.audioUrl = truncateUrlForLog(resolvedAudioUrl);
   diag.isProgressive = resolvedProgressive;
+  diag.isDash = resolvedIsDash;
 
   // 4. Validate we have a resolved URL
   try {
@@ -719,7 +724,7 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
     // Only block when we KNOW the stream is DASH video-only and has no audio.
     // Unknown-origin streams (from context menus, direct URLs) are allowed
     // because they are likely progressive MP4s with embedded audio.
-    const isConfirmedDashVideoOnly = resolvedDashSeparate && !resolvedProgressive;
+    const isConfirmedDashVideoOnly = resolvedIsDash && !resolvedProgressive;
 
     if (isConfirmedDashVideoOnly) {
       // Confirmed DASH video-only stream with no audio and no progressive fallback

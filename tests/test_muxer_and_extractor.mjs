@@ -1444,6 +1444,39 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     assert.equal(result.audioUrl, null, "No audio URL");
     assert.equal(result.progressiveHdUrl, null, "No progressive HD fallback");
     assert.equal(result.progressiveSdUrl, null, "No progressive SD fallback");
+    assert.equal(result.isDash, true, "DASH video-only is still flagged as isDash");
     // This is a genuinely silent source — downloading video-only is correct
+  });
+
+  // ---------- Test 12: isDash flag is true for DASH-origin streams (with or without audio) ----------
+  it("T12: isDash is true for DASH streams regardless of audio presence", () => {
+    // DASH with audio
+    const dashWithAudio = `<MPD><Period><AdaptationSet contentType="video"><Representation mimeType="video/mp4" width="1080" height="1920" bandwidth="4000000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/dv.mp4?oe=X</BaseURL></Representation></AdaptationSet><AdaptationSet contentType="audio"><Representation mimeType="audio/mp4" bandwidth="128000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/da.mp4?oe=Y</BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const text1 = `{"dash_manifest":"${dashWithAudio.replace(/"/g, '\\"')}"}`;
+    const r1 = FbExtractor.extractStreamsFromText(text1);
+    assert.equal(r1.isDash, true, "DASH with audio: isDash should be true");
+    assert.ok(r1.audioUrl, "DASH with audio: audioUrl should be present");
+
+    // DASH without audio
+    const dashNoAudio = `<MPD><Period><AdaptationSet contentType="video"><Representation mimeType="video/mp4" width="720" height="1280" bandwidth="2000000"><BaseURL>https://video-sin6-4.xx.fbcdn.net/dv_only.mp4?oe=Z</BaseURL></Representation></AdaptationSet></Period></MPD>`;
+    const text2 = `{"dash_manifest":"${dashNoAudio.replace(/"/g, '\\"')}"}`;
+    const r2 = FbExtractor.extractStreamsFromText(text2);
+    assert.equal(r2.isDash, true, "DASH without audio: isDash should be true");
+    assert.equal(r2.audioUrl, null, "DASH without audio: audioUrl should be null");
+  });
+
+  // ---------- Test 13: isDash flag is false for progressive and generic streams ----------
+  it("T13: isDash is false for progressive and generic MP4 streams", () => {
+    // Progressive
+    const text1 = `{"browser_native_hd_url":"https://video-sin6-4.xx.fbcdn.net/prog.mp4?oe=P"}`;
+    const r1 = FbExtractor.extractStreamsFromText(text1);
+    assert.equal(r1.isDash, false, "Progressive: isDash should be false");
+    assert.equal(r1.isProgressive, true, "Progressive: isProgressive should be true");
+
+    // Generic MP4
+    const text2 = `here is a video https://video-sin6-4.xx.fbcdn.net/generic.mp4?oe=G end`;
+    const r2 = FbExtractor.extractStreamsFromText(text2);
+    assert.equal(r2.isDash, false, "Generic: isDash should be false");
+    assert.equal(r2.isProgressive, true, "Generic: isProgressive should be true");
   });
 });

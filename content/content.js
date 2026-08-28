@@ -359,6 +359,7 @@
     // Only exact videoId match is allowed
 
     let isProgressive = false;
+    let isDash = false;
     let progressiveHdUrl = null;
     let progressiveSdUrl = null;
 
@@ -373,6 +374,7 @@
       audioUrl = streamMatch.audioUrl || null;
       isDashSeparate = Boolean(streamMatch.isDashSeparate || (streamMatch.audioUrl && downloadUrl && streamMatch.audioUrl !== downloadUrl));
       isProgressive = Boolean(streamMatch.isProgressive);
+      isDash = Boolean(streamMatch.isDash);
       progressiveHdUrl = streamMatch.progressiveHdUrl || null;
       progressiveSdUrl = streamMatch.progressiveSdUrl || null;
     }
@@ -413,6 +415,7 @@
           url: downloadUrl,
           audioUrl: audioUrl,
           isDashSeparate: isDashSeparate,
+          isDash: isDash,
           isProgressive: isProgressive,
           progressiveHdUrl: progressiveHdUrl,
           progressiveSdUrl: progressiveSdUrl,
