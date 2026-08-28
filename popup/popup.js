@@ -156,11 +156,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       ? (videoInfo.hdUrl || videoInfo.sdUrl || videoInfo.url)
       : (videoInfo.sdUrl || videoInfo.hdUrl || videoInfo.url);
 
+    const isDashSeparate = Boolean(
+      videoInfo.isDashSeparate ||
+      (videoInfo.audioUrl && targetStream && videoInfo.audioUrl !== targetStream)
+    );
+
     chrome.runtime.sendMessage(
       {
         action: "DOWNLOAD_FILE",
         payload: {
           url: targetStream && !targetStream.startsWith("blob:") ? targetStream : null,
+          audioUrl: videoInfo.audioUrl || null,
+          isDashSeparate: isDashSeparate,
           postUrl: videoInfo.postLink,
           tabId: activeTab?.id,
           type: videoInfo.type || "video",

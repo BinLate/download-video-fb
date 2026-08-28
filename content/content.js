@@ -502,11 +502,15 @@
       liveIds.add(info.id);
       let matchedHd = null;
       let matchedSd = null;
+      let matchedAudio = null;
+      let matchedDashSeparate = false;
 
       if (info.videoId && scriptData.has(info.videoId)) {
         const entry = scriptData.get(info.videoId);
         matchedHd = entry.hdUrl;
         matchedSd = entry.sdUrl;
+        matchedAudio = entry.audioUrl || null;
+        matchedDashSeparate = Boolean(entry.isDashSeparate);
       }
 
       detectedVideos.set(info.id, {
@@ -518,6 +522,8 @@
         elementSrc: info.url && !info.url.startsWith("blob:") ? info.url : null,
         hdUrl: matchedHd,
         sdUrl: matchedSd,
+        audioUrl: matchedAudio,
+        isDashSeparate: matchedDashSeparate,
         isBlob: info.isBlob,
         postLink: info.postLink
       });
