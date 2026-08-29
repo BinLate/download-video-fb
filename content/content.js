@@ -44,22 +44,31 @@
 
     try {
       chrome.runtime.sendMessage(message, (res) => {
-        if (chrome.runtime?.lastError) {
-          const errText = chrome.runtime.lastError.message || "";
-          if (errText.includes("context invalidated") || errText.includes("Could not establish connection")) {
+        const lastErr = chrome.runtime?.lastError;
+        if (lastErr) {
+          const errText = lastErr.message || "";
+          if (
+            errText.includes("context invalidated") ||
+            errText.includes("Could not establish connection") ||
+            errText.includes("No SW") ||
+            errText.includes("message port closed")
+          ) {
             if (domObserver) {
               domObserver.disconnect();
               domObserver = null;
             }
-            return;
           }
+          if (typeof callback === "function") {
+            callback({ success: false, error: errText });
+          }
+          return;
         }
         if (typeof callback === "function") {
           callback(res);
         }
       });
     } catch (err) {
-      if (err.message && err.message.includes("context invalidated")) {
+      if (err.message && (err.message.includes("context invalidated") || err.message.includes("No SW"))) {
         if (domObserver) {
           domObserver.disconnect();
           domObserver = null;

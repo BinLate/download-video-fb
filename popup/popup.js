@@ -232,6 +232,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         btnDownloadHd.disabled = false;
         btnDownloadSd.disabled = false;
 
+        if (chrome.runtime?.lastError) {
+          statusText.textContent = "⚠️ Không thể kết nối với Service Worker. Hãy thử lại.";
+          return;
+        }
+
         if (res && res.success) {
           statusText.textContent = "✅ Đang tải video...";
         } else {

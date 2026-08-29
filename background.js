@@ -3,7 +3,7 @@
  * Author: Bin.Late
  */
 
-const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.21";
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.22";
 console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
 
 const tabVideosMap = new Map();
@@ -112,7 +112,9 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
         console.warn("[Bin.Late Downloader] Context menu download error:", err.message);
       });
     } else if (tab?.id) {
-      chrome.tabs.sendMessage(tab.id, { action: "TRIGGER_CURRENT_VIDEO_DOWNLOAD" });
+      chrome.tabs.sendMessage(tab.id, { action: "TRIGGER_CURRENT_VIDEO_DOWNLOAD" }, () => {
+        void chrome.runtime?.lastError;
+      });
     }
   }
 });
