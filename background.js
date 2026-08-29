@@ -3,7 +3,7 @@
  * Author: Bin.Late
  */
 
-const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.22";
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.23";
 console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
 
 const tabVideosMap = new Map();
@@ -88,13 +88,23 @@ function hydrateFromSessionStorage() {
   });
 }
 
-// Initialize Context Menus
+// Initialize Context Menus safely
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: "fb_downloader_download_video",
-    title: "⬇️ Tải Video/Reel này (Bin.Late Downloader)",
-    contexts: ["video", "link"]
-  });
+  try {
+    chrome.contextMenus.removeAll(() => {
+      void chrome.runtime?.lastError;
+      chrome.contextMenus.create(
+        {
+          id: "fb_downloader_download_video",
+          title: "⬇️ Tải Video/Reel này (Bin.Late Downloader)",
+          contexts: ["video", "link"]
+        },
+        () => {
+          void chrome.runtime?.lastError;
+        }
+      );
+    });
+  } catch (_) {}
   console.log("[Bin.Late FB Downloader] Service worker initialized.");
 });
 
@@ -966,7 +976,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     default:
-      sendResponse({ status: "unknown_action" });
+      // Do not sendResponse here: other listeners (such as offscreen document) handle other actions.
       break;
   }
 });
