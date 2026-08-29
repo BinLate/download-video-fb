@@ -132,6 +132,8 @@
    * Helper to extract HD, SD, and Audio URLs from embedded scripts or DOM.
    * Leverages Extractor.extractUrlsFromScriptText to isolate video structures safely.
    */
+  let lastDiscoveredStreamWithAudio = null;
+
   function extractUrlsFromScripts() {
     const urlsMap = new Map();
     const scripts = document.querySelectorAll('script');
@@ -140,6 +142,7 @@
       const raw = script.textContent;
       if (!raw || raw.length < 30) continue;
 
+      // 1. Structured JSON extraction by video ID
       const subMap = Extractor.extractUrlsFromScriptText(raw);
       if (subMap && typeof subMap.forEach === "function") {
         subMap.forEach((streamInfo, videoId) => {
@@ -147,8 +150,28 @@
             if (!urlsMap.has(videoId) || (streamInfo.audioUrl && !urlsMap.get(videoId).audioUrl)) {
               urlsMap.set(videoId, streamInfo);
             }
+            if (streamInfo.audioUrl) {
+              lastDiscoveredStreamWithAudio = streamInfo;
+            }
           }
         });
+      }
+
+      // 2. Direct DASH manifest / representations extraction from raw text
+      if (raw.includes("dash_manifest") || raw.includes("playback_video_dash_xml") || raw.includes("<MPD") || raw.includes("representations")) {
+        const directStreams = typeof Extractor.extractStreamsFromText === "function" ? Extractor.extractStreamsFromText(raw) : null;
+        if (directStreams && (directStreams.hdUrl || directStreams.sdUrl)) {
+          if (directStreams.audioUrl) {
+            lastDiscoveredStreamWithAudio = directStreams;
+          }
+          const idMatch = raw.match(/"(?:video_id|videoId|id)":\s*"?(\d{6,30})"?/);
+          if (idMatch && isNumericFacebookId(idMatch[1])) {
+            const vidId = idMatch[1];
+            if (!urlsMap.has(vidId) || (directStreams.audioUrl && !urlsMap.get(vidId).audioUrl)) {
+              urlsMap.set(vidId, directStreams);
+            }
+          }
+        }
       }
     }
     return urlsMap;
@@ -163,13 +186,29 @@
 
     if (authoritativeVideoId && isNumericFacebookId(authoritativeVideoId) && scriptUrls.has(authoritativeVideoId)) {
       streamMatch = scriptUrls.get(authoritativeVideoId);
-    } else if (
-      !authoritativeVideoId &&
-      scriptUrls.size === 1 &&
-      Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)
-    ) {
-      // Dedicated single-video page without an explicit DOM ID: safe only if there is exactly 1 media configuration
-      streamMatch = scriptUrls.values().next().value;
+    }
+
+    if (!streamMatch) {
+      const urlId = extractVideoId(window.location.href, null);
+      if (urlId && scriptUrls.has(urlId)) {
+        streamMatch = scriptUrls.get(urlId);
+      }
+    }
+
+    if (!streamMatch && Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)) {
+      // Find stream that has audioUrl
+      for (const st of scriptUrls.values()) {
+        if (st && st.audioUrl) {
+          streamMatch = st;
+          break;
+        }
+      }
+      if (!streamMatch && scriptUrls.size > 0) {
+        streamMatch = scriptUrls.values().next().value;
+      }
+      if (!streamMatch && lastDiscoveredStreamWithAudio) {
+        streamMatch = lastDiscoveredStreamWithAudio;
+      }
     }
 
     return streamMatch;
@@ -448,11 +487,7 @@
       }
     }
 
-    if (isDashSeparate && audioUrl) {
-      showToast(`🎬 Đang ghép Video & Âm thanh ${videoInfo.type.toUpperCase()} (${quality})...`);
-    } else {
-      showToast(`⏳ Đang chuẩn bị tải ${videoInfo.type.toUpperCase()} (${quality})...`);
-    }
+    showToast(`⏳ Đang tải ${videoInfo.type === "reel" ? "Reel" : "Video"} (${quality})...`);
 
     safeSendMessage(
       {
@@ -467,7 +502,9 @@
           progressiveSdUrl: progressiveSdUrl,
           postUrl: (videoInfo.postLink && !/facebook\.com\/(?:reels?|watch)?\/?$/i.test(videoInfo.postLink))
             ? videoInfo.postLink
-            : (authoritativeVideoId ? `https://www.facebook.com/reel/${authoritativeVideoId}` : null),
+            : (authoritativeVideoId
+                ? `https://www.facebook.com/reel/${authoritativeVideoId}`
+                : (/facebook\.com/i.test(window.location.href) && !/facebook\.com\/(?:reels?|watch)?\/?$/i.test(window.location.href) ? window.location.href : null)),
           videoId: authoritativeVideoId,
           selectedSource:
             videoInfo.url && !videoInfo.url.startsWith("blob:")
@@ -481,7 +518,7 @@
       (res) => {
         if (!res) return;
         if (res.success) {
-          showToast(`✅ Đang tải xuống: ${videoInfo.title.substring(0, 25)}...`);
+          showToast(`✅ Đã bắt đầu tải xuống (${quality})`);
         } else {
           const errMsg = res.error || "Không tìm thấy luồng video. Hãy phát video vài giây rồi thử lại.";
           showToast(`⚠️ ${errMsg}`);

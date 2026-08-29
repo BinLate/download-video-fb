@@ -3,21 +3,9 @@
  * Author: Bin.Late
  */
 
-try {
-  importScripts("./lib/extractor.js", "./lib/mp4muxer.js", "./lib/blob_manager.js");
-} catch (e1) {
-  try {
-    importScripts("/lib/extractor.js", "/lib/mp4muxer.js", "/lib/blob_manager.js");
-  } catch (e2) {
-    try {
-      importScripts("lib/extractor.js", "lib/mp4muxer.js", "lib/blob_manager.js");
-    } catch (e3) {
-      console.error("[Download Video FB] Fatal: importScripts failed:", e3);
-    }
-  }
-}
+importScripts("lib/extractor.js", "lib/mp4muxer.js", "lib/blob_manager.js");
 
-const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.15";
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.19";
 console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
 
 const tabVideosMap = new Map();
@@ -158,6 +146,14 @@ function getResponseHeader(headers, name) {
  * Classification of a CDN response as downloadable video media.
  * Recognizes progressive MP4s, DASH segments, and versioned binary video payloads.
  */
+const tabRecentMediaMap = new Map(); // tabId -> Array of { url, videoTyped, audioTyped, manifest, ts }
+const MAX_RECENT_MEDIA = 20;
+const RECENT_MEDIA_TTL = 3 * 60 * 1000;
+
+/**
+ * Classification of a CDN response as downloadable video or audio media.
+ * Recognizes progressive MP4s, DASH segments, versioned binary media payloads, and audio streams.
+ */
 function classifyVideoResponse(url, contentType) {
   if (!url) return null;
   let pathname = "";
@@ -170,18 +166,28 @@ function classifyVideoResponse(url, contentType) {
 
   // 1. DASH manifests: recorded for tracking/manifest parsing, flagged as manifest
   if (ct.includes("dash+xml") || pathname.endsWith(".mpd")) {
-    return { url, videoTyped: false, manifest: true };
+    return { url, videoTyped: false, audioTyped: false, manifest: true };
   }
 
-  // 2. Explicit video typing from server
-  if (ct.startsWith("video/")) return { url, videoTyped: true, manifest: false };
-
-  // 3. Progressive MP4 or M4V
-  if (/\.(mp4|m4v)$/.test(pathname)) return { url, videoTyped: false, manifest: false };
-
-  // 4. Binary media payload on FB CDN (e.g. /v/, /o1/v/, /hvideo/, etc.)
-  const binaryMediaCt =
+  // 2. Explicit audio typing from server or audio path
+  const isExplicitAudio =
     ct.startsWith("audio/") ||
+    pathname.includes("/a/") ||
+    pathname.includes("_audio.") ||
+    pathname.endsWith(".m4a") ||
+    pathname.endsWith(".aac");
+  if (isExplicitAudio) {
+    return { url, videoTyped: false, audioTyped: true, manifest: false };
+  }
+
+  // 3. Explicit video typing from server
+  if (ct.startsWith("video/")) return { url, videoTyped: true, audioTyped: false, manifest: false };
+
+  // 4. Progressive MP4 or M4V
+  if (/\.(mp4|m4v)$/.test(pathname)) return { url, videoTyped: false, audioTyped: false, manifest: false };
+
+  // 5. Binary media payload on FB CDN (e.g. /v/, /o1/v/, /hvideo/, etc.)
+  const binaryMediaCt =
     ct === "application/octet-stream" ||
     ct === "binary/octet-stream" ||
     ct === "application/x-mp4";
@@ -189,7 +195,7 @@ function classifyVideoResponse(url, contentType) {
     binaryMediaCt &&
     (/^\/(v|o1\/v|hvideo|rsrc\.php)\//.test(pathname) || isValidMediaStream(url))
   ) {
-    return { url, videoTyped: false, manifest: false };
+    return { url, videoTyped: false, audioTyped: false, manifest: false };
   }
 
   return null;
@@ -282,13 +288,32 @@ function recordTabMedia(tabId, url, videoTyped, manifest, expectedSessionId = nu
 
 function handleMediaWebRequest(details) {
   if (details.tabId === undefined || details.tabId < 0) return;
-  void isSessionLiveForTab(details.tabId).then((observedSessionId) => {
-    if (observedSessionId === null) return;
-    const contentType = getResponseHeader(details.responseHeaders, "content-type");
-    const classified = classifyVideoResponse(details.url, contentType);
-    if (classified) {
+  const contentType = getResponseHeader(details.responseHeaders, "content-type");
+  const classified = classifyVideoResponse(details.url, contentType);
+  if (!classified) return;
+
+  // Continuously record media streams per tab in rolling cache
+  const tabId = Number(details.tabId);
+  const now = Date.now();
+  let recent = tabRecentMediaMap.get(tabId) || [];
+  recent = recent.filter((e) => now - e.ts < RECENT_MEDIA_TTL);
+  if (!recent.some((e) => e.url === classified.url)) {
+    recent.unshift({
+      url: classified.url,
+      videoTyped: !!classified.videoTyped,
+      audioTyped: !!classified.audioTyped,
+      manifest: !!classified.manifest,
+      ts: now
+    });
+    if (recent.length > MAX_RECENT_MEDIA) recent.length = MAX_RECENT_MEDIA;
+    tabRecentMediaMap.set(tabId, recent);
+  }
+
+  // Also record to session-armed tabMediaMap if session is active
+  void isSessionLiveForTab(tabId).then((observedSessionId) => {
+    if (observedSessionId !== null) {
       recordTabMedia(
-        details.tabId,
+        tabId,
         classified.url,
         classified.videoTyped,
         classified.manifest,
@@ -409,9 +434,12 @@ async function resolveFacebookVideoUrl(targetUrl, preferredQuality = "HD") {
 
   const trimmed = targetUrl.trim();
   if (/^\d{6,30}$/.test(trimmed)) {
+    pushAttempt(`https://m.facebook.com/reel/${trimmed}`);
+    pushAttempt(`https://m.facebook.com/watch/?v=${trimmed}`);
+    pushAttempt(`https://www.facebook.com/plugins/video.php?href=https%3A%2F%2Fwww.facebook.com%2Fwatch%2F%3Fv%3D${trimmed}&show_text=0`);
+    pushAttempt(`https://www.facebook.com/video/video_data_async/?video_id=${trimmed}`);
     pushAttempt(`https://www.facebook.com/reel/${trimmed}`);
     pushAttempt(`https://www.facebook.com/watch/?v=${trimmed}`);
-    pushAttempt(`https://m.facebook.com/reel/${trimmed}`);
   } else {
     try {
       const parsed = new URL(trimmed);
@@ -419,13 +447,16 @@ async function resolveFacebookVideoUrl(targetUrl, preferredQuality = "HD") {
         const idMatch = parsed.pathname.match(/\/(?:reel|reels|videos|watch)(?:\/[^/]+)*\/(\d{6,30})/i) || parsed.search.match(/[?&]v=(\d{6,30})/);
         if (idMatch) {
           const numId = idMatch[1];
+          pushAttempt(`https://m.facebook.com/reel/${numId}`);
+          pushAttempt(`https://m.facebook.com/watch/?v=${numId}`);
+          pushAttempt(`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(trimmed)}&show_text=0`);
+          pushAttempt(`https://www.facebook.com/video/video_data_async/?video_id=${numId}`);
           pushAttempt(`https://www.facebook.com/reel/${numId}`);
           pushAttempt(`https://www.facebook.com/watch/?v=${numId}`);
-          pushAttempt(`https://m.facebook.com/reel/${numId}`);
         } else if (parsed.pathname !== "/" && parsed.pathname !== "" && !/^\/(?:reels?|watch)\/?$/i.test(parsed.pathname)) {
-          pushAttempt(trimmed);
           pushAttempt(`${parsed.protocol}//m.facebook.com${parsed.pathname}${parsed.search}`);
           pushAttempt(`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(trimmed)}&show_text=0`);
+          pushAttempt(trimmed);
         } else {
           // Generic root URL like facebook.com/ or facebook.com/reels/ WITHOUT ID -> DO NOT SSR to avoid grabbing random feed video!
           return null;
@@ -622,7 +653,13 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
     resolvedUrl = cleanMediaUrl(url);
   }
 
-  const lookupTarget = postUrl || url;
+  // Derive authoritative Facebook page/post URL for SSR
+  const pageLookup =
+    postUrl && typeof postUrl === "string" && postUrl.startsWith("http") && !/facebook\.com\/(?:reels?|watch)?\/?$/i.test(postUrl)
+      ? postUrl
+      : (isNumericFacebookId(videoId) ? `https://www.facebook.com/reel/${videoId}` : null);
+
+  const lookupTarget = pageLookup || (postUrl && typeof postUrl === "string" && postUrl.startsWith("http") ? postUrl : url);
 
   // 2. Query the live active tab context for real-time video + audio stream pairs
   if ((!resolvedUrl || !resolvedAudioUrl) && typeof tabId === "number" && tabId >= 0) {
@@ -674,27 +711,26 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       : nudgeSources;
 
   // 4. Resolve from the post/page URL via SSR + embed strategies
-  if (!resolvedUrl) {
-    if (lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")) {
-      const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
-      if (streamInfo) {
-        if (typeof streamInfo === "string") {
-          resolvedUrl = streamInfo;
-        } else {
-          fullStreamInfo = streamInfo;
-          resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
-          resolvedAudioUrl = streamInfo.audioUrl || null;
-          resolvedDashSeparate = !!streamInfo.isDashSeparate;
-          resolvedIsDash = !!streamInfo.isDash;
-          resolvedProgressive = !!streamInfo.isProgressive;
-          resolvedProgressiveHd = streamInfo.progressiveHdUrl || resolvedProgressiveHd;
-          resolvedProgressiveSd = streamInfo.progressiveSdUrl || resolvedProgressiveSd;
-        }
+  const ssrTarget = pageLookup || (lookupTarget && !isValidMediaStream(lookupTarget) ? lookupTarget : null);
+  if (!resolvedUrl && ssrTarget) {
+    const streamInfo = await resolveFacebookVideoUrl(ssrTarget, quality);
+    if (streamInfo) {
+      if (typeof streamInfo === "string") {
+        resolvedUrl = streamInfo;
+      } else {
+        fullStreamInfo = streamInfo;
+        resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
+        resolvedAudioUrl = streamInfo.audioUrl || null;
+        resolvedDashSeparate = !!streamInfo.isDashSeparate;
+        resolvedIsDash = !!streamInfo.isDash;
+        resolvedProgressive = !!streamInfo.isProgressive;
+        resolvedProgressiveHd = streamInfo.progressiveHdUrl || resolvedProgressiveHd;
+        resolvedProgressiveSd = streamInfo.progressiveSdUrl || resolvedProgressiveSd;
       }
     }
-  } else if (!resolvedAudioUrl && lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")) {
+  } else if (!resolvedAudioUrl && ssrTarget) {
     // Attempt SSR audio enrichment when audioUrl is missing
-    const streamInfo = await resolveFacebookVideoUrl(lookupTarget, quality);
+    const streamInfo = await resolveFacebookVideoUrl(ssrTarget, quality);
     if (streamInfo && typeof streamInfo === "object") {
       fullStreamInfo = streamInfo;
       if (streamInfo.audioUrl) {
@@ -713,6 +749,21 @@ async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false
       // Always capture progressive fallback URLs from SSR
       if (!resolvedProgressiveHd) resolvedProgressiveHd = streamInfo.progressiveHdUrl || null;
       if (!resolvedProgressiveSd) resolvedProgressiveSd = streamInfo.progressiveSdUrl || null;
+    }
+  }
+
+  // 5. Fallback: check recent tab media cache for audio stream if still missing
+  if (!resolvedAudioUrl && typeof tabId === "number" && tabId >= 0) {
+    const recent = tabRecentMediaMap.get(tabId) || [];
+    const now = Date.now();
+    const recentAudio = recent.find(
+      (e) => e.audioTyped && (now - e.ts < RECENT_MEDIA_TTL) && isValidMediaStream(e.url) && e.url !== resolvedUrl
+    );
+    if (recentAudio) {
+      resolvedAudioUrl = cleanMediaUrl(recentAudio.url);
+      resolvedDashSeparate = true;
+      resolvedIsDash = true;
+      console.log(`[Download Video FB] v${EXT_VERSION} Found audio stream from recent tab media: ${truncateUrlForLog(resolvedAudioUrl)}`);
     }
   }
 

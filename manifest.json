@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Download Video / Reel Facebook",
-  "version": "1.2.15",
+  "version": "1.2.19",
   "description": "Tiện ích mở rộng hỗ trợ tải xuống Video và Reels Facebook chất lượng cao (HD/SD). Tác giả: Bin.Late",
   "author": "Bin.Late",
   "icons": {
@@ -20,6 +20,9 @@
   },
   "background": {
     "service_worker": "background.js"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self';"
   },
   "permissions": [
     "downloads",
@@ -53,10 +56,15 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "icons/*"
+        "icons/*",
+        "js/wasm/*",
+        "worker.js"
       ],
       "matches": [
-        "*://*.facebook.com/*"
+        "*://*.facebook.com/*",
+        "https://*.facebook.com/*",
+        "https://m.facebook.com/*",
+        "https://web.facebook.com/*"
       ]
     }
   ]

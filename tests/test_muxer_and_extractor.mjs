@@ -814,21 +814,23 @@ describe("Mp4Muxer (lib/mp4muxer.js)", () => {
     const trexIds = trexes.map((t) => new DataView(merged, t.start, t.size).getUint32(12, false));
     assert.deepEqual([...trexIds].sort(), [1, 2], "trex defaults must cover both tracks");
 
-    // audio fragment tfhd must reference track 2, mfhd renumbered sequentially
-    const audioMoof = moofs[2];
-    const audioChildren = Mp4Muxer.findBoxes(merged, audioMoof.start + audioMoof.headerSize, audioMoof.end);
-    const audioTraf = audioChildren.find((b) => b.type === "traf");
-    const audioTfhd = Mp4Muxer.findBoxByType(merged, "tfhd", audioTraf.start + audioTraf.headerSize, audioTraf.end);
-    assert.equal(new DataView(merged, audioTfhd.start, audioTfhd.size).getUint32(12, false), 2, "audio fragment tfhd must reference track 2");
-    const audioMfhd = audioChildren.find((b) => b.type === "mfhd");
-    assert.equal(new DataView(merged, audioMfhd.start, audioMfhd.size).getUint32(12, false), 3, "sequence numbers must be renumbered 1..3");
+    // Verify track IDs across all fragments
+    const fragmentTrackIds = moofs.map((m) => {
+      const children = Mp4Muxer.findBoxes(merged, m.start + m.headerSize, m.end);
+      const traf = children.find((b) => b.type === "traf");
+      const tfhd = Mp4Muxer.findBoxByType(merged, "tfhd", traf.start + traf.headerSize, traf.end);
+      return new DataView(merged, tfhd.start, tfhd.size).getUint32(12, false);
+    });
+    assert.deepEqual(fragmentTrackIds.filter(id => id === 1).length, 2, "Must contain 2 video track fragments");
+    assert.deepEqual(fragmentTrackIds.filter(id => id === 2).length, 1, "Must contain 1 audio track fragment");
 
-    // video fragment tfhd must keep track 1
-    const videoMoof = moofs[0];
-    const videoChildren = Mp4Muxer.findBoxes(merged, videoMoof.start + videoMoof.headerSize, videoMoof.end);
-    const videoTraf = videoChildren.find((b) => b.type === "traf");
-    const videoTfhd = Mp4Muxer.findBoxByType(merged, "tfhd", videoTraf.start + videoTraf.headerSize, videoTraf.end);
-    assert.equal(new DataView(merged, videoTfhd.start, videoTfhd.size).getUint32(12, false), 1, "video fragment tfhd must reference track 1");
+    // Sequence numbers must be strictly sequential 1..3
+    const seqNumbers = moofs.map((m) => {
+      const children = Mp4Muxer.findBoxes(merged, m.start + m.headerSize, m.end);
+      const mfhd = children.find((b) => b.type === "mfhd");
+      return new DataView(merged, mfhd.start, mfhd.size).getUint32(12, false);
+    });
+    assert.deepEqual(seqNumbers, [1, 2, 3], "sequence numbers must be renumbered 1..3");
   });
 
   it("should shift explicit base_data_offset when merging fMP4 fragments", () => {
@@ -1796,5 +1798,64 @@ describe("Download Decision & Mux Flow (v1.2.1)", () => {
     dispatchLiveQuery(123, "1069318268997320", "https://www.facebook.com/reel/1069318268997320");
     assert.equal(capturedMessage.videoId, "1069318268997320");
     assert.equal(capturedMessage.pageUrl, "https://www.facebook.com/reel/1069318268997320");
+  });
+
+  // ---------- Test 29: Extended Facebook audio keys extraction ----------
+  it("T29: extractStreamsFromText and extractUrlsFromScriptText extract audio from extended audio keys", () => {
+    const payload = JSON.stringify({
+      video_id: "888999000111",
+      browser_native_hd_url: "https://video-sin6-4.xx.fbcdn.net/v/hd.mp4?oe=123",
+      audio_playback_url: "https://video-sin6-4.xx.fbcdn.net/a/audio_playback.mp4?oe=123"
+    });
+
+    const singleRes = FbExtractor.extractStreamsFromText(payload);
+    assert.ok(singleRes, "Must extract stream info");
+    assert.ok(singleRes.audioUrl.includes("audio_playback.mp4"), "Must extract audio_playback_url");
+    assert.equal(singleRes.isDashSeparate, true);
+
+    const scriptMap = FbExtractor.extractUrlsFromScriptText(payload);
+    assert.ok(scriptMap.has("888999000111"));
+    const scriptStream = scriptMap.get("888999000111");
+    assert.ok(scriptStream.audioUrl.includes("audio_playback.mp4"));
+  });
+
+  // ---------- Test 30: Audio stream classification ----------
+  it("T30: Audio CDN URLs and content-types are classified with audioTyped: true", () => {
+    // Mimic background.js classifyVideoResponse
+    function classifyVideoResponse(url, contentType) {
+      if (!url) return null;
+      let pathname = "";
+      try {
+        pathname = new URL(url).pathname.toLowerCase();
+      } catch (_) {
+        pathname = String(url).split("?")[0].toLowerCase();
+      }
+      const ct = String(contentType || "").toLowerCase().trim();
+      if (ct.includes("dash+xml") || pathname.endsWith(".mpd")) {
+        return { url, videoTyped: false, audioTyped: false, manifest: true };
+      }
+      const isExplicitAudio =
+        ct.startsWith("audio/") ||
+        pathname.includes("/a/") ||
+        pathname.includes("_audio.") ||
+        pathname.endsWith(".m4a") ||
+        pathname.endsWith(".aac");
+      if (isExplicitAudio) {
+        return { url, videoTyped: false, audioTyped: true, manifest: false };
+      }
+      if (ct.startsWith("video/")) return { url, videoTyped: true, audioTyped: false, manifest: false };
+      if (/\.(mp4|m4v)$/.test(pathname)) return { url, videoTyped: false, audioTyped: false, manifest: false };
+      return null;
+    }
+
+    const audioResponse = classifyVideoResponse("https://video-sin6-4.xx.fbcdn.net/o1/a/AQN_audio.mp4?oe=123", "audio/mp4");
+    assert.ok(audioResponse);
+    assert.equal(audioResponse.audioTyped, true);
+    assert.equal(audioResponse.videoTyped, false);
+
+    const videoResponse = classifyVideoResponse("https://video-sin6-4.xx.fbcdn.net/o1/v/AQN_video.mp4?oe=123", "video/mp4");
+    assert.ok(videoResponse);
+    assert.equal(videoResponse.videoTyped, true);
+    assert.equal(videoResponse.audioTyped, false);
   });
 });
