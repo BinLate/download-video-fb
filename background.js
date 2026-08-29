@@ -3,11 +3,7 @@
  * Author: Bin.Late
  */
 
-import "./lib/extractor.js";
-import "./lib/mp4muxer.js";
-import "./lib/blob_manager.js";
-
-const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.20";
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.21";
 console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
 
 const tabVideosMap = new Map();
