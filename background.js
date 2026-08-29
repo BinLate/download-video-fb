@@ -3,6 +3,11 @@
  * Author: Bin.Late
  */
 
+importScripts("lib/extractor.js", "lib/mp4muxer.js", "lib/blob_manager.js");
+
+const EXT_VERSION = chrome.runtime.getManifest?.()?.version || "1.2.19";
+console.log(`[Download Video FB] v${EXT_VERSION} service worker loaded`);
+
 const tabVideosMap = new Map();
 // tabId -> { sessionId, armedAt, list: [{url, videoTyped, ts, session}] }
 // Captures are ONLY recorded while an extraction session is armed for the tab,
@@ -141,6 +146,14 @@ function getResponseHeader(headers, name) {
  * Classification of a CDN response as downloadable video media.
  * Recognizes progressive MP4s, DASH segments, and versioned binary video payloads.
  */
+const tabRecentMediaMap = new Map(); // tabId -> Array of { url, videoTyped, audioTyped, manifest, ts }
+const MAX_RECENT_MEDIA = 20;
+const RECENT_MEDIA_TTL = 3 * 60 * 1000;
+
+/**
+ * Classification of a CDN response as downloadable video or audio media.
+ * Recognizes progressive MP4s, DASH segments, versioned binary media payloads, and audio streams.
+ */
 function classifyVideoResponse(url, contentType) {
   if (!url) return null;
   let pathname = "";
@@ -153,18 +166,28 @@ function classifyVideoResponse(url, contentType) {
 
   // 1. DASH manifests: recorded for tracking/manifest parsing, flagged as manifest
   if (ct.includes("dash+xml") || pathname.endsWith(".mpd")) {
-    return { url, videoTyped: false, manifest: true };
+    return { url, videoTyped: false, audioTyped: false, manifest: true };
   }
 
-  // 2. Explicit video typing from server
-  if (ct.startsWith("video/")) return { url, videoTyped: true, manifest: false };
-
-  // 3. Progressive MP4 or M4V
-  if (/\.(mp4|m4v)$/.test(pathname)) return { url, videoTyped: false, manifest: false };
-
-  // 4. Binary media payload on FB CDN (e.g. /v/, /o1/v/, /hvideo/, etc.)
-  const binaryMediaCt =
+  // 2. Explicit audio typing from server or audio path
+  const isExplicitAudio =
     ct.startsWith("audio/") ||
+    pathname.includes("/a/") ||
+    pathname.includes("_audio.") ||
+    pathname.endsWith(".m4a") ||
+    pathname.endsWith(".aac");
+  if (isExplicitAudio) {
+    return { url, videoTyped: false, audioTyped: true, manifest: false };
+  }
+
+  // 3. Explicit video typing from server
+  if (ct.startsWith("video/")) return { url, videoTyped: true, audioTyped: false, manifest: false };
+
+  // 4. Progressive MP4 or M4V
+  if (/\.(mp4|m4v)$/.test(pathname)) return { url, videoTyped: false, audioTyped: false, manifest: false };
+
+  // 5. Binary media payload on FB CDN (e.g. /v/, /o1/v/, /hvideo/, etc.)
+  const binaryMediaCt =
     ct === "application/octet-stream" ||
     ct === "binary/octet-stream" ||
     ct === "application/x-mp4";
@@ -172,7 +195,7 @@ function classifyVideoResponse(url, contentType) {
     binaryMediaCt &&
     (/^\/(v|o1\/v|hvideo|rsrc\.php)\//.test(pathname) || isValidMediaStream(url))
   ) {
-    return { url, videoTyped: false, manifest: false };
+    return { url, videoTyped: false, audioTyped: false, manifest: false };
   }
 
   return null;
@@ -265,13 +288,32 @@ function recordTabMedia(tabId, url, videoTyped, manifest, expectedSessionId = nu
 
 function handleMediaWebRequest(details) {
   if (details.tabId === undefined || details.tabId < 0) return;
-  void isSessionLiveForTab(details.tabId).then((observedSessionId) => {
-    if (observedSessionId === null) return;
-    const contentType = getResponseHeader(details.responseHeaders, "content-type");
-    const classified = classifyVideoResponse(details.url, contentType);
-    if (classified) {
+  const contentType = getResponseHeader(details.responseHeaders, "content-type");
+  const classified = classifyVideoResponse(details.url, contentType);
+  if (!classified) return;
+
+  // Continuously record media streams per tab in rolling cache
+  const tabId = Number(details.tabId);
+  const now = Date.now();
+  let recent = tabRecentMediaMap.get(tabId) || [];
+  recent = recent.filter((e) => now - e.ts < RECENT_MEDIA_TTL);
+  if (!recent.some((e) => e.url === classified.url)) {
+    recent.unshift({
+      url: classified.url,
+      videoTyped: !!classified.videoTyped,
+      audioTyped: !!classified.audioTyped,
+      manifest: !!classified.manifest,
+      ts: now
+    });
+    if (recent.length > MAX_RECENT_MEDIA) recent.length = MAX_RECENT_MEDIA;
+    tabRecentMediaMap.set(tabId, recent);
+  }
+
+  // Also record to session-armed tabMediaMap if session is active
+  void isSessionLiveForTab(tabId).then((observedSessionId) => {
+    if (observedSessionId !== null) {
       recordTabMedia(
-        details.tabId,
+        tabId,
         classified.url,
         classified.videoTyped,
         classified.manifest,
@@ -294,248 +336,35 @@ try {
  * Decode JSON/Unicode/XML-escaped sequences.
  */
 function decodeFbEscapes(text) {
-  if (!text) return "";
-  return text
-    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-    .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-    .replace(/\\+\//g, "/")
-    .replace(/\\+\\/g, "\\")
-    .replace(/\\+"/g, '"')
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"');
+  return FbExtractor.decodeFbEscapes(text);
 }
 
 /**
  * Clean URL and strip trailing XML tags or byte-range parameters.
  */
 function cleanMediaUrl(u) {
-  if (!u || typeof u !== "string") return null;
-  let cleaned = decodeFbEscapes(u).trim();
-  // Strip trailing %3C/BaseURL or </BaseURL>
-  cleaned = cleaned.replace(/(%3C|<)\/?BaseURL.*$/i, "").trim();
-  // Strip bytestart/byteend range parameters so the full continuous stream is downloaded
-  cleaned = cleaned.replace(/[?&]bytestart=\d+/g, "");
-  cleaned = cleaned.replace(/[?&]byteend=\d+/g, "");
-  if (!cleaned.includes("?") && cleaned.includes("&")) {
-    cleaned = cleaned.replace("&", "?");
-  }
-  if (!cleaned.startsWith("http")) return null;
-  return cleaned;
+  return FbExtractor.cleanMediaUrl(u);
 }
 
 /**
- * Parse DASH MPD XML manifest into ranked HD, SD, and Audio stream URLs.
+ * Validate that URL belongs to authorized Facebook CDN hosts.
  */
-function parseDashManifest(manifestText) {
-  if (!manifestText) return null;
-  const decoded = decodeFbEscapes(manifestText);
-
-  const videos = [];
-  const audios = [];
-
-  const repRegex = /<Representation\b([^>]*)>([\s\S]*?)<\/Representation>/gi;
-  const baseUrlRegex = /<BaseURL\b[^>]*>([^<]+)<\/BaseURL>/i;
-
-  let repMatch;
-  while ((repMatch = repRegex.exec(decoded)) !== null) {
-    const attrs = repMatch[1];
-    const body = repMatch[2];
-
-    const urlMatch = baseUrlRegex.exec(body);
-    if (!urlMatch) continue;
-
-    const rawUrl = cleanMediaUrl(urlMatch[1]);
-    if (!rawUrl) continue;
-
-    const mimeM = attrs.match(/mimeType=["']([^"']+)["']/i);
-    const widthM = attrs.match(/width=["'](\d+)["']/i);
-    const heightM = attrs.match(/height=["'](\d+)["']/i);
-    const bwM = attrs.match(/bandwidth=["'](\d+)["']/i);
-    const codecsM = attrs.match(/codecs=["']([^"']+)["']/i);
-    const qualityM = attrs.match(/FBQualityLabel=["']([^"']+)["']/i);
-
-    const mime = mimeM ? mimeM[1].toLowerCase() : "";
-    const width = widthM ? parseInt(widthM[1], 10) : 0;
-    const height = heightM ? parseInt(heightM[1], 10) : 0;
-    const bandwidth = bwM ? parseInt(bwM[1], 10) : 0;
-    const codecs = codecsM ? codecsM[1].toLowerCase() : "";
-    const qualityLabel = qualityM ? qualityM[1] : "";
-
-    const isAudio = mime.includes("audio") || /^(mp4a|opus|aac)/i.test(codecs);
-    const isVideo = !isAudio && (mime.includes("video") || width > 0 || height > 0 || /^(avc1|vp09|vp9|av01|hev1|hvc1)/i.test(codecs));
-
-    const item = {
-      url: rawUrl,
-      width,
-      height,
-      bandwidth,
-      codecs,
-      qualityLabel,
-      mime
-    };
-
-    if (isAudio) {
-      audios.push(item);
-    } else {
-      videos.push(item);
-    }
-  }
-
-  // Fallback: direct <BaseURL> extraction
-  if (videos.length === 0) {
-    const allBaseUrls = decoded.match(/<BaseURL\b[^>]*>([^<]+)<\/BaseURL>/gi);
-    if (allBaseUrls) {
-      for (const bu of allBaseUrls) {
-        const m = bu.match(/<BaseURL\b[^>]*>([^<]+)<\/BaseURL>/i);
-        if (m) {
-          const cu = cleanMediaUrl(m[1]);
-          if (cu && (cu.includes("fbcdn.net") || cu.includes("fbsbx.com"))) {
-            videos.push({
-              url: cu,
-              width: 0,
-              height: 0,
-              bandwidth: 0,
-              codecs: "",
-              qualityLabel: "",
-              mime: "video/mp4"
-            });
-          }
-        }
-      }
-    }
-  }
-
-  if (videos.length === 0 && audios.length === 0) return null;
-
-  videos.sort((a, b) => (b.height * b.width - a.height * a.width) || (b.bandwidth - a.bandwidth) || (b.height - a.height));
-  audios.sort((a, b) => b.bandwidth - a.bandwidth);
-
-  const hdUrl = videos.length > 0 ? videos[0].url : null;
-  let sdUrl = null;
-  if (videos.length > 1) {
-    const sdCandidate = videos.find(v => v.height > 0 && v.height <= 640);
-    sdUrl = sdCandidate ? sdCandidate.url : videos[videos.length - 1].url;
-  } else {
-    sdUrl = hdUrl;
-  }
-
-  return {
-    hdUrl,
-    sdUrl,
-    audioUrl: audios.length > 0 ? audios[0].url : null,
-    videos,
-    audios
-  };
-}
-
-/**
- * Scan any fbcdn MP4 URL embedded inside a text blob.
- */
-function extractGenericMp4FromText(text) {
-  if (!text) return null;
-  const m = text.match(
-    /https?(?::\\?\/\\?\/)[a-z0-9.-]*fbcdn\.net[^"'\s<>]+?\.mp4[^"'\s<>]*/i
-  );
-  return m ? cleanMediaUrl(m[0]) : null;
-}
-
-/**
- * Extract media streams directly from Facebook HTML string.
- */
-function extractStreamsFromHtml(rawHtml) {
-  if (!rawHtml) return null;
-  const textsToTry = [rawHtml];
-  const decoded = decodeFbEscapes(rawHtml);
-  if (decoded !== rawHtml) textsToTry.push(decoded);
-
-  let hdUrl = null;
-  let sdUrl = null;
-
-  for (const text of textsToTry) {
-    // 1. Progressive streams
-    const hdMatch = text.match(/"(?:playable_url_quality_hd|browser_native_hd_url|hd_src_no_ratelimit|hd_src)"\s*:\s*"([^"]+)"/);
-    const sdMatch = text.match(/"(?:playable_url|browser_native_sd_url|sd_src_no_ratelimit|sd_src)"\s*:\s*"([^"]+)"/);
-    if (hdMatch) hdUrl = hdUrl || cleanMediaUrl(hdMatch[1]);
-    if (sdMatch) sdUrl = sdUrl || cleanMediaUrl(sdMatch[1]);
-
-    // 2. DASH Manifest
-    const dashMatch = text.match(/"(?:dash_manifest|playback_video_dash_xml|video_dash_manifest|dash_manifest_xml)"\s*:\s*"([^"]+)"/);
-    if (dashMatch) {
-      const dashParsed = parseDashManifest(dashMatch[1]);
-      if (dashParsed) {
-        hdUrl = hdUrl || dashParsed.hdUrl;
-        sdUrl = sdUrl || dashParsed.sdUrl;
-      }
-    } else if (text.includes("<MPD") || text.includes("&lt;MPD") || text.includes("<BaseURL")) {
-      const dashParsed = parseDashManifest(text);
-      if (dashParsed) {
-        hdUrl = hdUrl || dashParsed.hdUrl;
-        sdUrl = sdUrl || dashParsed.sdUrl;
-      }
-    }
-
-    // 3. GraphQL representations array
-    if (!hdUrl && !sdUrl) {
-      const repArrayMatch = text.match(/"representations"\s*:\s*\[([\s\S]*?)\]/);
-      if (repArrayMatch) {
-        const baseUrls = repArrayMatch[1].match(/"base_url"\s*:\s*"([^"]+)"/g);
-        if (baseUrls && baseUrls.length > 0) {
-          const extracted = baseUrls.map(b => {
-            const m = b.match(/"base_url"\s*:\s*"([^"]+)"/);
-            return m ? cleanMediaUrl(m[1]) : null;
-          }).filter(Boolean);
-          if (extracted.length > 0) {
-            hdUrl = extracted[0];
-            sdUrl = extracted.length > 1 ? extracted[extracted.length - 1] : extracted[0];
-          }
-        }
-      }
-    }
-
-    if (hdUrl || sdUrl) break;
-  }
-
-  if (!hdUrl && !sdUrl) {
-    for (const text of textsToTry) {
-      const generic = extractGenericMp4FromText(text);
-      if (generic) {
-        sdUrl = generic;
-        break;
-      }
-    }
-  }
-
-  if (hdUrl || sdUrl) {
-    return {
-      hdUrl: hdUrl || sdUrl,
-      sdUrl: sdUrl || hdUrl
-    };
-  }
-  return null;
-}
-
-const MEDIA_HOST_PATTERN = /(?:^|\.)(?:fbcdn\.net|fbsbx\.com)$/i;
-
 function isFacebookMediaHost(hostname) {
-  return MEDIA_HOST_PATTERN.test(String(hostname || ""));
+  return FbExtractor.isFacebookMediaHost(hostname);
 }
 
 /**
  * Validate media stream URL for chrome.downloads.
  */
 function isValidMediaStream(u) {
-  if (!u || typeof u !== "string") return false;
-  if (u.startsWith("blob:")) return false;
-  let parsed;
-  try {
-    parsed = new URL(u);
-  } catch (_) {
-    return false;
-  }
-  if (parsed.protocol !== "https:") return false;
-  return isFacebookMediaHost(parsed.hostname);
+  return FbExtractor.isValidMediaStream(u);
+}
+
+/**
+ * Validate numeric Facebook video ID.
+ */
+function isNumericFacebookId(id) {
+  return Boolean(FbExtractor && typeof FbExtractor.isNumericFacebookId === "function" && FbExtractor.isNumericFacebookId(id));
 }
 
 /**
@@ -571,11 +400,9 @@ async function resolveFacebookVideoUrl(targetUrl, preferredQuality = "HD") {
         return null;
       }
       const html = await response.text();
-      const streams = extractStreamsFromHtml(html);
+      const streams = FbExtractor.extractStreamsFromText(html);
       if (streams) {
-        if (preferredQuality === "HD" && streams.hdUrl) return streams.hdUrl;
-        if (streams.sdUrl) return streams.sdUrl;
-        if (streams.hdUrl) return streams.hdUrl;
+        return streams;
       }
 
       if (response.url && response.url !== url && /facebook\.com/i.test(response.url)) {
@@ -605,15 +432,42 @@ async function resolveFacebookVideoUrl(targetUrl, preferredQuality = "HD") {
     if (u && !attempts.includes(u)) attempts.push(u);
   };
 
-  pushAttempt(targetUrl);
-  try {
-    const parsed = new URL(targetUrl);
-    if (/(^|\.)facebook\.com$/i.test(parsed.hostname)) {
-      pushAttempt(`${parsed.protocol}//m.facebook.com${parsed.pathname}${parsed.search}`);
-      pushAttempt(`${parsed.protocol}//mbasic.facebook.com${parsed.pathname}${parsed.search}`);
-      pushAttempt(`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(targetUrl)}&show_text=0`);
+  const trimmed = targetUrl.trim();
+  if (/^\d{6,30}$/.test(trimmed)) {
+    pushAttempt(`https://m.facebook.com/reel/${trimmed}`);
+    pushAttempt(`https://m.facebook.com/watch/?v=${trimmed}`);
+    pushAttempt(`https://www.facebook.com/plugins/video.php?href=https%3A%2F%2Fwww.facebook.com%2Fwatch%2F%3Fv%3D${trimmed}&show_text=0`);
+    pushAttempt(`https://www.facebook.com/video/video_data_async/?video_id=${trimmed}`);
+    pushAttempt(`https://www.facebook.com/reel/${trimmed}`);
+    pushAttempt(`https://www.facebook.com/watch/?v=${trimmed}`);
+  } else {
+    try {
+      const parsed = new URL(trimmed);
+      if (/(^|\.)facebook\.com$/i.test(parsed.hostname) || /(^|\.)fb\.watch$/i.test(parsed.hostname)) {
+        const idMatch = parsed.pathname.match(/\/(?:reel|reels|videos|watch)(?:\/[^/]+)*\/(\d{6,30})/i) || parsed.search.match(/[?&]v=(\d{6,30})/);
+        if (idMatch) {
+          const numId = idMatch[1];
+          pushAttempt(`https://m.facebook.com/reel/${numId}`);
+          pushAttempt(`https://m.facebook.com/watch/?v=${numId}`);
+          pushAttempt(`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(trimmed)}&show_text=0`);
+          pushAttempt(`https://www.facebook.com/video/video_data_async/?video_id=${numId}`);
+          pushAttempt(`https://www.facebook.com/reel/${numId}`);
+          pushAttempt(`https://www.facebook.com/watch/?v=${numId}`);
+        } else if (parsed.pathname !== "/" && parsed.pathname !== "" && !/^\/(?:reels?|watch)\/?$/i.test(parsed.pathname)) {
+          pushAttempt(`${parsed.protocol}//m.facebook.com${parsed.pathname}${parsed.search}`);
+          pushAttempt(`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(trimmed)}&show_text=0`);
+          pushAttempt(trimmed);
+        } else {
+          // Generic root URL like facebook.com/ or facebook.com/reels/ WITHOUT ID -> DO NOT SSR to avoid grabbing random feed video!
+          return null;
+        }
+      } else {
+        pushAttempt(trimmed);
+      }
+    } catch (_) {
+      return null;
     }
-  } catch (_) {}
+  }
 
   for (let i = 0; i < attempts.length; i++) {
     const resolved = await fetchStream(attempts[i], `ssr-attempt ${i + 1}/${attempts.length}`);
@@ -693,11 +547,104 @@ function nudgeAndAwaitCapture(tabId, waitMs = 1000) {
   });
 }
 
+let offscreenCreating = null;
+
+async function hasOffscreenDoc() {
+  if (typeof chrome.offscreen?.hasDocument === "function") {
+    return await chrome.offscreen.hasDocument();
+  }
+  if (typeof chrome.runtime?.getContexts === "function") {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"]
+    }).catch(() => []);
+    return contexts && contexts.length > 0;
+  }
+  return false;
+}
+
+async function ensureOffscreenDocument() {
+  if (typeof chrome.offscreen === "undefined") {
+    return false;
+  }
+  if (await hasOffscreenDoc()) {
+    return true;
+  }
+  if (offscreenCreating) {
+    await offscreenCreating;
+    return true;
+  }
+
+  offscreenCreating = chrome.offscreen.createDocument({
+    url: "offscreen/offscreen.html",
+    reasons: ["BLOBS"],
+    justification: "Ghép luồng video và âm thanh DASH thành file MP4 hoàn chỉnh"
+  });
+
+  try {
+    await offscreenCreating;
+    return true;
+  } catch (err) {
+    console.warn("[Bin.Late FB Downloader] Offscreen creation error:", err);
+    return false;
+  } finally {
+    offscreenCreating = null;
+  }
+}
+
+// Track and revoke active Blob URLs across MV3 lifecycle events
+chrome.downloads.onChanged.addListener(async (delta) => {
+  if (delta.state && (delta.state.current === "complete" || delta.state.current === "interrupted")) {
+    const blobUrl = await BlobManager.unregisterBlobDownload(delta.id);
+    if (blobUrl) {
+      await BlobManager.revokeBlobUrl(blobUrl);
+    }
+  }
+});
+
 /**
- * Unified download flow.
+ * Truncate a URL for safe diagnostic logging (remove auth tokens).
  */
-async function handleDownloadFlow({ url, postUrl, tabId, type = "video", title = "facebook", quality = "HD", selectedSource = null }) {
+function truncateUrlForLog(u) {
+  if (!u || typeof u !== "string") return "(null)";
+  try {
+    const parsed = new URL(u);
+    return `${parsed.hostname}${parsed.pathname.substring(0, 60)}...`;
+  } catch (_) {
+    return u.substring(0, 80) + "...";
+  }
+}
+
+/**
+ * Unified download flow with 3-tier stream selection:
+ *   Tier 1: DASH video + DASH audio → mux into dual-track MP4
+ *   Tier 2: Fall back to progressive MP4 (already contains audio)
+ *   Tier 3: Video-only with explicit warning
+ */
+async function handleDownloadFlow({ url, audioUrl = null, isDashSeparate = false, isDash = false, isProgressive = false, progressiveHdUrl = null, progressiveSdUrl = null, postUrl = null, videoId = null, tabId = null, type = "video", title = "facebook", quality = "HD", selectedSource = null }) {
+  const diag = {
+    version: EXT_VERSION,
+    videoId: videoId,
+    videoUrl: null,
+    audioUrl: null,
+    isProgressive: false,
+    isDash: false,
+    videoBytes: 0,
+    audioBytes: 0,
+    outputBytes: 0,
+    muxAttempted: false,
+    muxSuccess: false,
+    fallbackUsed: null,
+    hasAudioTrack: false
+  };
+
   let resolvedUrl = null;
+  let resolvedAudioUrl = audioUrl;
+  let resolvedDashSeparate = isDashSeparate;
+  let resolvedIsDash = isDash;
+  let resolvedProgressive = isProgressive;
+  let resolvedProgressiveHd = progressiveHdUrl;
+  let resolvedProgressiveSd = progressiveSdUrl;
+  let fullStreamInfo = null; // Store full SSR result for fallback
 
   const captureSessionId = armCaptureSession(tabId);
 
@@ -706,9 +653,52 @@ async function handleDownloadFlow({ url, postUrl, tabId, type = "video", title =
     resolvedUrl = cleanMediaUrl(url);
   }
 
-  const lookupTarget = postUrl || url;
+  // Derive authoritative Facebook page/post URL for SSR
+  const pageLookup =
+    postUrl && typeof postUrl === "string" && postUrl.startsWith("http") && !/facebook\.com\/(?:reels?|watch)?\/?$/i.test(postUrl)
+      ? postUrl
+      : (isNumericFacebookId(videoId) ? `https://www.facebook.com/reel/${videoId}` : null);
 
-  // 2. Nudge the tab to re-scan
+  const lookupTarget = pageLookup || (postUrl && typeof postUrl === "string" && postUrl.startsWith("http") ? postUrl : url);
+
+  // 2. Query the live active tab context for real-time video + audio stream pairs
+  if ((!resolvedUrl || !resolvedAudioUrl) && typeof tabId === "number" && tabId >= 0) {
+    try {
+      const liveStreams = await new Promise((res) => {
+        chrome.tabs.sendMessage(tabId, { action: "GET_LIVE_PAGE_STREAMS", videoId: isNumericFacebookId(videoId) ? videoId : null, pageUrl: lookupTarget }, (resp) => {
+          if (chrome.runtime.lastError) {
+            console.log(`[Download Video FB] v${EXT_VERSION} GET_LIVE_PAGE_STREAMS notice:`, chrome.runtime.lastError.message);
+            res(null);
+          } else {
+            res(resp?.streams || null);
+          }
+        });
+      });
+      if (liveStreams && typeof liveStreams === "object") {
+        if (liveStreams.audioUrl) {
+          resolvedAudioUrl = liveStreams.audioUrl;
+          resolvedDashSeparate = true;
+          resolvedIsDash = true;
+          if (quality === "HD" && liveStreams.hdUrl) {
+            resolvedUrl = liveStreams.hdUrl;
+          } else if (liveStreams.sdUrl) {
+            resolvedUrl = liveStreams.sdUrl;
+          } else if (liveStreams.hdUrl) {
+            resolvedUrl = liveStreams.hdUrl;
+          }
+        } else if (!resolvedUrl) {
+          resolvedUrl = (quality === "HD" && liveStreams.hdUrl) ? liveStreams.hdUrl : (liveStreams.sdUrl || liveStreams.hdUrl);
+        }
+        if (liveStreams.progressiveHdUrl) resolvedProgressiveHd = liveStreams.progressiveHdUrl;
+        if (liveStreams.progressiveSdUrl) resolvedProgressiveSd = liveStreams.progressiveSdUrl;
+        if (liveStreams.isProgressive) resolvedProgressive = true;
+      }
+    } catch (tabErr) {
+      console.warn(`[Download Video FB] v${EXT_VERSION} Live tab stream query error:`, tabErr && tabErr.message ? tabErr.message : tabErr);
+    }
+  }
+
+  // 3. Nudge the tab to re-scan
   let nudgeSources = [];
   if (captureSessionId !== null && !resolvedUrl) {
     const nudge = await nudgeAndAwaitCapture(tabId);
@@ -720,40 +710,214 @@ async function handleDownloadFlow({ url, postUrl, tabId, type = "video", title =
       ? [selectedSource]
       : nudgeSources;
 
-  // 3. Resolve from the post/page URL via SSR + embed strategies
-  if (
-    !resolvedUrl &&
-    lookupTarget && typeof lookupTarget === "string" && lookupTarget.startsWith("http")
-  ) {
-    resolvedUrl = await resolveFacebookVideoUrl(lookupTarget, quality);
+  // 4. Resolve from the post/page URL via SSR + embed strategies
+  const ssrTarget = pageLookup || (lookupTarget && !isValidMediaStream(lookupTarget) ? lookupTarget : null);
+  if (!resolvedUrl && ssrTarget) {
+    const streamInfo = await resolveFacebookVideoUrl(ssrTarget, quality);
+    if (streamInfo) {
+      if (typeof streamInfo === "string") {
+        resolvedUrl = streamInfo;
+      } else {
+        fullStreamInfo = streamInfo;
+        resolvedUrl = (quality === "HD" && streamInfo.hdUrl) ? streamInfo.hdUrl : (streamInfo.sdUrl || streamInfo.hdUrl);
+        resolvedAudioUrl = streamInfo.audioUrl || null;
+        resolvedDashSeparate = !!streamInfo.isDashSeparate;
+        resolvedIsDash = !!streamInfo.isDash;
+        resolvedProgressive = !!streamInfo.isProgressive;
+        resolvedProgressiveHd = streamInfo.progressiveHdUrl || resolvedProgressiveHd;
+        resolvedProgressiveSd = streamInfo.progressiveSdUrl || resolvedProgressiveSd;
+      }
+    }
+  } else if (!resolvedAudioUrl && ssrTarget) {
+    // Attempt SSR audio enrichment when audioUrl is missing
+    const streamInfo = await resolveFacebookVideoUrl(ssrTarget, quality);
+    if (streamInfo && typeof streamInfo === "object") {
+      fullStreamInfo = streamInfo;
+      if (streamInfo.audioUrl) {
+        resolvedAudioUrl = streamInfo.audioUrl;
+        resolvedDashSeparate = true;
+        // Pair video stream from the same manifest
+        if (quality === "HD" && streamInfo.hdUrl) {
+          resolvedUrl = streamInfo.hdUrl;
+        } else if (streamInfo.sdUrl) {
+          resolvedUrl = streamInfo.sdUrl;
+        } else if (streamInfo.hdUrl) {
+          resolvedUrl = streamInfo.hdUrl;
+        }
+      }
+      if (streamInfo.isDash) resolvedIsDash = true;
+      // Always capture progressive fallback URLs from SSR
+      if (!resolvedProgressiveHd) resolvedProgressiveHd = streamInfo.progressiveHdUrl || null;
+      if (!resolvedProgressiveSd) resolvedProgressiveSd = streamInfo.progressiveSdUrl || null;
+    }
   }
 
-  // 4. Fall back to streams captured during THIS extraction session
-  if (!resolvedUrl && captureSessionId !== null) {
-    const targetHint = lookupTarget || url || "";
-    resolvedUrl = pickBestCapturedStream(Number(tabId), targetHint, targetSource);
+  // 5. Fallback: check recent tab media cache for audio stream if still missing
+  if (!resolvedAudioUrl && typeof tabId === "number" && tabId >= 0) {
+    const recent = tabRecentMediaMap.get(tabId) || [];
+    const now = Date.now();
+    const recentAudio = recent.find(
+      (e) => e.audioTyped && (now - e.ts < RECENT_MEDIA_TTL) && isValidMediaStream(e.url) && e.url !== resolvedUrl
+    );
+    if (recentAudio) {
+      resolvedAudioUrl = cleanMediaUrl(recentAudio.url);
+      resolvedDashSeparate = true;
+      resolvedIsDash = true;
+      console.log(`[Download Video FB] v${EXT_VERSION} Found audio stream from recent tab media: ${truncateUrlForLog(resolvedAudioUrl)}`);
+    }
   }
 
+  diag.videoUrl = truncateUrlForLog(resolvedUrl);
+  diag.audioUrl = truncateUrlForLog(resolvedAudioUrl);
+  diag.isProgressive = resolvedProgressive;
+  diag.isDash = resolvedIsDash;
+
+  // 4. Validate we have a resolved URL
   try {
     if (!isValidMediaStream(resolvedUrl)) {
-      const captureHint = networkCaptureAvailable
-        ? ""
-        : " (Thu thập mạng không khả dụng: " + networkCaptureReason + ")";
       throw new Error(
         "Không tìm thấy luồng video trực tiếp cho liên kết này. " +
         "Hãy mở video/reel trên Facebook, phát video vài giây rồi thử lại " +
-        "(hoặc dùng nút 'Tải Reel' hiển thị ngay trên video)." + captureHint
+        "(hoặc dùng nút 'Tải Reel' hiển thị ngay trên video)."
       );
     }
 
+    // ========================================================================
+    // TIER 1: DASH video + audio → mux into dual-track MP4
+    // ========================================================================
+    if (resolvedUrl && resolvedAudioUrl) {
+      if (!FbExtractor.isValidMediaStream(resolvedAudioUrl)) {
+        console.warn(`[Download Video FB] v${EXT_VERSION} Audio URL invalid, skipping Tier 1 mux`);
+      } else {
+        diag.muxAttempted = true;
+        const muxResult = await attemptDashMux(resolvedUrl, resolvedAudioUrl, diag);
+        if (muxResult.success) {
+          diag.muxSuccess = true;
+          diag.hasAudioTrack = true;
+          diag.outputBytes = muxResult.outputBytes || 0;
+          console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
+          return await downloadMedia({
+            url: muxResult.blobUrl,
+            isInternalBlob: true,
+            type, title, quality
+          });
+        }
+        // Tier 1 failed — log and continue to Tier 2
+        console.warn(`[Download Video FB] v${EXT_VERSION} Tier 1 DASH mux failed: ${muxResult.reason}. Attempting fallback...`);
+      }
+    } else {
+      console.log(`[Download Video FB] v${EXT_VERSION} No audio URL — skipping Tier 1. Progressive: ${resolvedProgressive}`);
+    }
+
+    // ========================================================================
+    // TIER 2: Fall back to progressive MP4 (already contains audio)
+    // ========================================================================
+    const progressiveFallback = resolvedProgressiveHd || resolvedProgressiveSd;
+    if (progressiveFallback && isValidMediaStream(progressiveFallback)) {
+      // Don't use this fallback if the resolved URL is already progressive (same URL)
+      if (progressiveFallback !== resolvedUrl || resolvedProgressive) {
+        diag.fallbackUsed = "progressive";
+        diag.hasAudioTrack = true; // Progressive MP4s contain embedded audio
+        console.log(`[Download Video FB] v${EXT_VERSION} Tier 2: Using progressive MP4 fallback: ${truncateUrlForLog(progressiveFallback)}`);
+        console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
+        return await downloadMedia({
+          url: progressiveFallback,
+          isInternalBlob: false,
+          type, title, quality
+        });
+      }
+    }
+
+    // ========================================================================
+    // TIER 3: Download whatever we have — but BLOCK confirmed silent DASH streams
+    // ========================================================================
+    // Stream classification:
+    //   resolvedProgressive === true  → known progressive (has embedded audio)
+    //   resolvedDashSeparate === true → known DASH (video-only, needs separate audio)
+    //   both false                    → unknown origin (e.g. context menu, direct URL)
+    //
+    // Only block when we KNOW the stream is DASH video-only and has no audio.
+    // Unknown-origin streams (from context menus, direct URLs) are allowed
+    // because they are likely progressive MP4s with embedded audio.
+    const isConfirmedDashVideoOnly = resolvedIsDash && !resolvedProgressive;
+
+    if (isConfirmedDashVideoOnly) {
+      // Confirmed DASH video-only stream with no audio and no progressive fallback
+      // — refuse to silently deliver a mute file to the user.
+      diag.fallbackUsed = "blocked_video_only";
+      diag.hasAudioTrack = false;
+      console.error(`[Download Video FB] v${EXT_VERSION} Tier 3 BLOCKED: Confirmed DASH video-only stream with no audio and no progressive fallback.`);
+      console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
+      throw new Error(
+        "Không thể tải video có âm thanh. Video này sử dụng luồng DASH riêng biệt " +
+        "nhưng không tìm được luồng âm thanh hoặc phiên bản MP4 đầy đủ. " +
+        "Hãy phát video vài giây rồi thử tải lại."
+      );
+    }
+
+    // Progressive or unknown-origin stream — download (likely has embedded audio)
+    diag.fallbackUsed = resolvedProgressive ? "progressive_original" : "unknown_origin_download";
+    diag.hasAudioTrack = true; // Assume embedded audio for progressive/unknown
+    console.log(`[Download Video FB] v${EXT_VERSION} Tier 3: ${resolvedProgressive ? "Progressive" : "Unknown-origin"} download (assuming embedded audio)`);
+    console.log(`[Download Video FB] v${EXT_VERSION} DIAG:`, JSON.stringify(diag));
     return await downloadMedia({
       url: resolvedUrl,
-      type: type,
-      title: title,
-      quality: quality
+      isInternalBlob: false,
+      type, title, quality
     });
   } finally {
     if (captureSessionId !== null) disarmCaptureSession(tabId, captureSessionId);
+  }
+}
+
+/**
+ * Attempt DASH mux via offscreen document.
+ * Returns { success, blobUrl, reason, outputBytes } — never throws.
+ */
+async function attemptDashMux(videoUrl, audioUrl, diag) {
+  try {
+    const offscreenReady = await ensureOffscreenDocument();
+    if (!offscreenReady) {
+      return { success: false, reason: "offscreen_unavailable" };
+    }
+
+    const muxResponse = await new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          action: "OFFSCREEN_MUX_MEDIA",
+          payload: { videoUrl, audioUrl }
+        },
+        (res) => {
+          if (chrome.runtime.lastError) {
+            resolve({ success: false, error: chrome.runtime.lastError.message, reason: "message_error" });
+          } else {
+            resolve(res || { success: false, error: "Không nhận được phản hồi từ bộ ghép.", reason: "no_response" });
+          }
+        }
+      );
+    });
+
+    // Update diagnostic info from mux response
+    if (muxResponse) {
+      diag.videoBytes = muxResponse.videoBytesLength || 0;
+      diag.audioBytes = muxResponse.audioBytesLength || 0;
+    }
+
+    if (muxResponse && muxResponse.success && muxResponse.blobUrl && muxResponse.isMuxed && muxResponse.hasAudio) {
+      return {
+        success: true,
+        blobUrl: muxResponse.blobUrl,
+        reason: null,
+        outputBytes: muxResponse.outputBytesLength || 0
+      };
+    }
+
+    return {
+      success: false,
+      reason: muxResponse?.reason || muxResponse?.error || "mux_failed"
+    };
+  } catch (err) {
+    return { success: false, reason: err?.message || "mux_exception" };
   }
 }
 
@@ -815,17 +979,31 @@ function sanitizeFilename(name) {
     .substring(0, 60);
 }
 
-async function downloadMedia({ url, type = "video", title = "facebook", quality = "HD" }) {
-  const cleanUrl = cleanMediaUrl(url);
-  if (!cleanUrl) {
+async function downloadMedia({ url, isInternalBlob = false, type = "video", title = "facebook", quality = "HD" }) {
+  if (!url || typeof url !== "string") {
     throw new Error("No valid media URL provided for download");
+  }
+
+  let targetUrl = null;
+  const isBlob = url.startsWith("blob:");
+
+  if (isBlob) {
+    if (!isInternalBlob) {
+      throw new Error("Direct external blob URL download is not permitted.");
+    }
+    targetUrl = url;
+  } else {
+    targetUrl = cleanMediaUrl(url);
+    if (!targetUrl || !isValidMediaStream(targetUrl)) {
+      throw new Error("No valid Facebook CDN media URL provided for download");
+    }
   }
 
   let mediaPath = "";
   try {
-    mediaPath = new URL(cleanUrl).pathname.toLowerCase();
+    mediaPath = new URL(targetUrl).pathname.toLowerCase();
   } catch (_) {
-    mediaPath = String(cleanUrl).split("?")[0].toLowerCase();
+    mediaPath = String(targetUrl).split("?")[0].toLowerCase();
   }
   if (mediaPath.endsWith(".mpd")) {
     throw new Error("Luồng tải được là manifest DASH (.mpd), không phải video MP4.");
@@ -835,21 +1013,62 @@ async function downloadMedia({ url, type = "video", title = "facebook", quality 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const filename = `BinLate_FB_${type.toUpperCase()}_${quality}_${cleanTitle}_${timestamp}.mp4`;
 
+  let pendingToken = null;
+  if (isBlob) {
+    try {
+      pendingToken = await BlobManager.beginPendingRegistration(targetUrl);
+    } catch (regErr) {
+      console.error("[Bin.Late FB Downloader] Failed to register pending blob download:", regErr);
+      await BlobManager.revokeBlobUrl(targetUrl);
+      throw new Error("Không thể khởi tạo lưu trữ phiên tải cho luồng video/âm thanh đã ghép: " + regErr.message);
+    }
+  }
+
   return new Promise((resolve, reject) => {
     chrome.downloads.download(
       {
-        url: cleanUrl,
+        url: targetUrl,
         filename: filename,
         saveAs: false,
         conflictAction: "uniquify"
       },
-      (downloadId) => {
+      async (downloadId) => {
         if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
+          const err = new Error(chrome.runtime.lastError.message);
+          if (isBlob) {
+            await BlobManager.cancelPendingRegistration(pendingToken);
+            await BlobManager.revokeBlobUrl(targetUrl);
+          }
+          reject(err);
         } else {
+          if (isBlob) {
+            try {
+              await BlobManager.completePendingRegistration(pendingToken, downloadId, targetUrl);
+            } catch (storageErr) {
+              console.warn("[Bin.Late FB Downloader] Failed to persist active registration; recording downloadId on pending:", storageErr.message);
+              await BlobManager.recordPendingDownloadId(pendingToken, downloadId);
+            }
+          }
           resolve(downloadId);
         }
       }
     );
+  });
+}
+
+// Track download completion to automatically revoke Blob URLs and close offscreen document
+if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onChanged) {
+  chrome.downloads.onChanged.addListener(async (delta) => {
+    if (!delta || !delta.id) return;
+    const downloadId = delta.id;
+    const isComplete = delta.state && delta.state.current === "complete";
+    const isInterrupted = delta.error && delta.error.current;
+
+    if (isComplete || isInterrupted) {
+      const blobUrl = await BlobManager.unregisterBlobDownload(downloadId);
+      if (blobUrl) {
+        await BlobManager.revokeBlobUrl(blobUrl);
+      }
+    }
   });
 }

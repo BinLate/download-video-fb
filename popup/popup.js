@@ -10,6 +10,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const detectedCountSpan = document.getElementById("detectedCount");
   const videoListContainer = document.getElementById("videoListContainer");
   const btnRescan = document.getElementById("btnRescan");
+  const appVersionTag = document.getElementById("appVersionTag");
+  if (appVersionTag && chrome.runtime?.getManifest) {
+    appVersionTag.textContent = "v" + (chrome.runtime.getManifest().version || "1.2.0");
+  }
   const tabBtns = document.querySelectorAll(".tab-btn");
   const tabContents = document.querySelectorAll(".tab-content");
 
@@ -156,11 +160,22 @@ document.addEventListener("DOMContentLoaded", async () => {
       ? (videoInfo.hdUrl || videoInfo.sdUrl || videoInfo.url)
       : (videoInfo.sdUrl || videoInfo.hdUrl || videoInfo.url);
 
+    const isDashSeparate = Boolean(
+      videoInfo.isDashSeparate ||
+      (videoInfo.audioUrl && targetStream && videoInfo.audioUrl !== targetStream)
+    );
+
     chrome.runtime.sendMessage(
       {
         action: "DOWNLOAD_FILE",
         payload: {
           url: targetStream && !targetStream.startsWith("blob:") ? targetStream : null,
+          audioUrl: videoInfo.audioUrl || null,
+          isDashSeparate: isDashSeparate,
+          isDash: Boolean(videoInfo.isDash),
+          isProgressive: Boolean(videoInfo.isProgressive),
+          progressiveHdUrl: videoInfo.progressiveHdUrl || null,
+          progressiveSdUrl: videoInfo.progressiveSdUrl || null,
           postUrl: videoInfo.postLink,
           tabId: activeTab?.id,
           type: videoInfo.type || "video",

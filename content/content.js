@@ -1,5 +1,6 @@
 /**
  * Download Video / Reel Facebook - Content Script
+ * Robust video detection, Reel extraction, safe MV3 messaging, and DASH stream support.
  * Author: Bin.Late
  */
 
@@ -12,6 +13,7 @@
 
   let detectedVideos = new Map();
   let scanDebounceTimer = null;
+  let domObserver = null;
 
   // SVG Icons
   const ICONS = {
@@ -22,318 +24,245 @@
   };
 
   /**
-   * Decode JSON/Unicode/XML-escaped sequences commonly found in FB payloads.
+   * Check if extension context is valid and active.
    */
-  function decodeFbEscapes(text) {
-    if (!text) return "";
-    return text
-      .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-      .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-      .replace(/\\+\//g, "/")
-      .replace(/\\+\\/g, "\\")
-      .replace(/\\+"/g, '"')
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"');
-  }
-
-  function cleanBaseUrl(url) {
-    if (!url) return null;
-    let u = decodeFbEscapes(url).trim();
-    // Strip trailing tags or encoded artifacts like %3C/BaseURL or </BaseURL>
-    u = u.replace(/(%3C|<)\/?BaseURL.*$/i, "").trim();
-    if (!u.startsWith("http")) return null;
-    return u;
+  function isExtensionValid() {
+    return typeof chrome !== "undefined" && Boolean(chrome.runtime && chrome.runtime.id);
   }
 
   /**
-   * Parse DASH MPD XML manifest into ranked HD, SD, and Audio stream URLs.
+   * Safe messaging wrapper that catches context invalidation and disconnects observers.
    */
-  function parseDashManifest(manifestText) {
-    if (!manifestText) return null;
-    const decoded = decodeFbEscapes(manifestText);
-
-    const videos = [];
-    const audios = [];
-
-    const repRegex = /<Representation\b([^>]*)>([\s\S]*?)<\/Representation>/gi;
-    const baseUrlRegex = /<BaseURL\b[^>]*>([^<]+)<\/BaseURL>/i;
-
-    let repMatch;
-    while ((repMatch = repRegex.exec(decoded)) !== null) {
-      const attrs = repMatch[1];
-      const body = repMatch[2];
-
-      const urlMatch = baseUrlRegex.exec(body);
-      if (!urlMatch) continue;
-
-      const rawUrl = cleanBaseUrl(urlMatch[1]);
-      if (!rawUrl) continue;
-
-      const mimeM = attrs.match(/mimeType=["']([^"']+)["']/i);
-      const widthM = attrs.match(/width=["'](\d+)["']/i);
-      const heightM = attrs.match(/height=["'](\d+)["']/i);
-      const bwM = attrs.match(/bandwidth=["'](\d+)["']/i);
-      const codecsM = attrs.match(/codecs=["']([^"']+)["']/i);
-      const qualityM = attrs.match(/FBQualityLabel=["']([^"']+)["']/i);
-
-      const mime = mimeM ? mimeM[1].toLowerCase() : "";
-      const width = widthM ? parseInt(widthM[1], 10) : 0;
-      const height = heightM ? parseInt(heightM[1], 10) : 0;
-      const bandwidth = bwM ? parseInt(bwM[1], 10) : 0;
-      const codecs = codecsM ? codecsM[1].toLowerCase() : "";
-      const qualityLabel = qualityM ? qualityM[1] : "";
-
-      const isAudio = mime.includes("audio") || /^(mp4a|opus|aac)/i.test(codecs);
-      const isVideo = !isAudio && (mime.includes("video") || width > 0 || height > 0 || /^(avc1|vp09|vp9|av01|hev1|hvc1)/i.test(codecs));
-
-      const item = {
-        url: rawUrl,
-        width,
-        height,
-        bandwidth,
-        codecs,
-        qualityLabel,
-        mime
-      };
-
-      if (isAudio) {
-        audios.push(item);
-      } else {
-        videos.push(item);
+  function safeSendMessage(message, callback) {
+    if (!isExtensionValid()) {
+      if (domObserver) {
+        domObserver.disconnect();
+        domObserver = null;
       }
+      return;
     }
 
-    // Direct fallback: scan all <BaseURL> tags if <Representation> regex found none
-    if (videos.length === 0) {
-      const allBaseUrls = decoded.match(/<BaseURL\b[^>]*>([^<]+)<\/BaseURL>/gi);
-      if (allBaseUrls) {
-        for (const bu of allBaseUrls) {
-          const m = bu.match(/<BaseURL\b[^>]*>([^<]+)<\/BaseURL>/i);
-          if (m) {
-            const cu = cleanBaseUrl(m[1]);
-            if (cu && (cu.includes("fbcdn.net") || cu.includes("fbsbx.com"))) {
-              videos.push({
-                url: cu,
-                width: 0,
-                height: 0,
-                bandwidth: 0,
-                codecs: "",
-                qualityLabel: "",
-                mime: "video/mp4"
-              });
+    try {
+      chrome.runtime.sendMessage(message, (res) => {
+        if (chrome.runtime?.lastError) {
+          const errText = chrome.runtime.lastError.message || "";
+          if (errText.includes("context invalidated") || errText.includes("Could not establish connection")) {
+            if (domObserver) {
+              domObserver.disconnect();
+              domObserver = null;
             }
+            return;
           }
         }
+        if (typeof callback === "function") {
+          callback(res);
+        }
+      });
+    } catch (err) {
+      if (err.message && err.message.includes("context invalidated")) {
+        if (domObserver) {
+          domObserver.disconnect();
+          domObserver = null;
+        }
+      } else {
+        console.warn("[Bin.Late FB Downloader] Messaging exception:", err.message);
       }
     }
-
-    if (videos.length === 0 && audios.length === 0) return null;
-
-    videos.sort((a, b) => (b.height * b.width - a.height * a.width) || (b.bandwidth - a.bandwidth) || (b.height - a.height));
-    audios.sort((a, b) => b.bandwidth - a.bandwidth);
-
-    const hdUrl = videos.length > 0 ? videos[0].url : null;
-    let sdUrl = null;
-    if (videos.length > 1) {
-      const sdCandidate = videos.find(v => v.height > 0 && v.height <= 640);
-      sdUrl = sdCandidate ? sdCandidate.url : videos[videos.length - 1].url;
-    } else {
-      sdUrl = hdUrl;
-    }
-
-    return {
-      hdUrl,
-      sdUrl,
-      audioUrl: audios.length > 0 ? audios[0].url : null,
-      videos,
-      audios
-    };
   }
 
   /**
-   * Scan any fbcdn MP4 URL embedded inside a text blob.
+   * Delegate to shared FbExtractor module or fallback in-memory helpers.
    */
-  function findGenericMp4(text) {
-    if (!text) return null;
-    const m = text.match(
-      /https?(?::\\?\/\\?\/)[a-z0-9.-]*fbcdn\.net[^"'\s<>]+?\.mp4[^"'\s<>]*/i
-    );
-    return m ? cleanBaseUrl(m[0]) : null;
-  }
-
-  /**
-   * Extract progressive URLs or DASH manifest streams from any text snippet.
-   */
-  function extractStreamsFromText(text) {
-    if (!text) return null;
-
-    const hdMatch = text.match(/"(?:playable_url_quality_hd|browser_native_hd_url|hd_src_no_ratelimit|hd_src)"\s*:\s*"([^"]+)"/);
-    const sdMatch = text.match(/"(?:playable_url|browser_native_sd_url|sd_src_no_ratelimit|sd_src)"\s*:\s*"([^"]+)"/);
-
-    const progressiveHd = hdMatch ? cleanBaseUrl(hdMatch[1]) : null;
-    const progressiveSd = sdMatch ? cleanBaseUrl(sdMatch[1]) : null;
-
-    // Check for DASH Manifest
-    const dashMatch = text.match(/"(?:dash_manifest|playback_video_dash_xml|video_dash_manifest|dash_manifest_xml)"\s*:\s*"([^"]+)"/);
-    let dashParsed = null;
-    if (dashMatch) {
-      dashParsed = parseDashManifest(dashMatch[1]);
-    } else if (text.includes("<MPD") || text.includes("&lt;MPD") || text.includes("<BaseURL")) {
-      dashParsed = parseDashManifest(text);
-    }
-
-    // Check GraphQL representations array
-    if (!progressiveHd && !dashParsed) {
-      const repArrayMatch = text.match(/"representations"\s*:\s*\[([\s\S]*?)\]/);
-      if (repArrayMatch) {
-        const baseUrls = repArrayMatch[1].match(/"base_url"\s*:\s*"([^"]+)"/g);
-        if (baseUrls && baseUrls.length > 0) {
-          const extracted = baseUrls.map(b => {
-            const m = b.match(/"base_url"\s*:\s*"([^"]+)"/);
-            return m ? cleanBaseUrl(m[1]) : null;
-          }).filter(Boolean);
-          if (extracted.length > 0) {
-            dashParsed = {
-              hdUrl: extracted[0],
-              sdUrl: extracted.length > 1 ? extracted[extracted.length - 1] : extracted[0],
-              audioUrl: null,
-              videos: [],
-              audios: []
-            };
-          }
+  const Extractor = (typeof FbExtractor !== "undefined" && FbExtractor) ? FbExtractor : {
+    decodeFbEscapes: function (text) {
+      if (!text) return "";
+      return text
+        .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+        .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+        .replace(/\\+\//g, "/")
+        .replace(/\\+\\/g, "\\")
+        .replace(/\\+"/g, '"')
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"');
+    },
+    cleanMediaUrl: function (url) {
+      if (!url) return null;
+      let u = url.trim().replace(/(%3C|<)\/?BaseURL.*$/i, "").trim();
+      u = u.replace(/[?&]bytestart=\d+/g, "").replace(/[?&]byteend=\d+/g, "");
+      if (u.includes("?") && !u.split("?")[1]) u = u.split("?")[0];
+      return u.startsWith("http") ? u : null;
+    },
+    parseDashManifest: function () { return null; },
+    extractStreamsFromText: function () { return null; },
+    isValidMediaStream: function () { return true; },
+    isDedicatedSingleVideoPage: function (path, search) {
+      if (/^\/(?:reel|reels)\/\d{6,30}\/?$/i.test(path || "")) return true;
+      if (/^\/share\/r\/[^/]+\/?$/i.test(path || "")) return true;
+      if (/^\/videos\/(?:[^/]+\/)?\d{6,30}\/?$/i.test(path || "")) return true;
+      if (/^\/watch\/?$/i.test(path || "")) {
+        try {
+          const s = String(search || "");
+          const params = new URLSearchParams(s.startsWith("?") ? s : `?${s}`);
+          const watchId = params.get("v");
+          return Boolean(watchId && /^\d{6,30}$/.test(watchId.trim()));
+        } catch (_) {
+          return false;
         }
       }
+      return false;
+    },
+    isNumericFacebookId: function (id) {
+      return typeof id === "string" && /^\d{6,30}$/.test(id.trim());
     }
+  };
 
-    const resolvedHd = progressiveHd || (dashParsed && dashParsed.hdUrl) || null;
-    const resolvedSd = progressiveSd || (dashParsed && dashParsed.sdUrl) || findGenericMp4(text) || resolvedHd;
-
-    if (resolvedHd || resolvedSd) {
-      return {
-        hdUrl: resolvedHd,
-        sdUrl: resolvedSd,
-        audioUrl: dashParsed ? dashParsed.audioUrl : null
-      };
+  /**
+   * Helper to check numeric Facebook video ID safely.
+   */
+  function isNumericFacebookId(id) {
+    if (typeof Extractor !== "undefined" && typeof Extractor.isNumericFacebookId === "function") {
+      return Extractor.isNumericFacebookId(id);
     }
-    return null;
+    return typeof id === "string" && /^\d{6,30}$/.test(id.trim());
   }
 
   /**
-   * Helper to extract HD and SD URLs from embedded scripts or DOM
+   * Helper to extract HD, SD, and Audio URLs from embedded scripts or DOM.
+   * Leverages Extractor.extractUrlsFromScriptText to isolate video structures safely.
    */
+  let lastDiscoveredStreamWithAudio = null;
+
   function extractUrlsFromScripts() {
     const urlsMap = new Map();
-    const scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
+    const scripts = document.querySelectorAll('script');
 
     for (const script of scripts) {
       const raw = script.textContent;
-      if (!raw) continue;
+      if (!raw || raw.length < 30) continue;
 
-      const hasVideoKeys =
-        raw.includes("playable_url") ||
-        raw.includes("browser_native") ||
-        raw.includes("dash_manifest") ||
-        raw.includes("playback_video_dash_xml") ||
-        raw.includes("video_dash_manifest") ||
-        raw.includes("representations") ||
-        raw.includes("BaseURL") ||
-        raw.includes(".mp4") ||
-        raw.includes("video_delivery");
-
-      if (!hasVideoKeys) continue;
-
-      const texts = new Set([raw]);
-      const decodedFull = decodeFbEscapes(raw);
-      if (decodedFull !== raw) texts.add(decodedFull);
-
-      for (const text of texts) {
-        // Match JSON object blocks containing video id
-        const objectRegex = /\{[^{}]*?"(?:video_id|id)"\s*:\s*"?(\d{8,25})"[^{}]*?\}/g;
-        let match;
-
-        while ((match = objectRegex.exec(text)) !== null) {
-          const block = match[0];
-          const videoId = match[1];
-          const streams = extractStreamsFromText(block);
-          if (streams) {
-            urlsMap.set(videoId, streams);
-          }
-        }
-
-        // Broader nested structure matching within ~4000 chars of video ID
-        const broaderRegex = /"(?:video_id|id)"\s*:\s*"(\d{8,25})"[\s\S]{0,4000}?"(?:playable_url_quality_hd|browser_native_hd_url|playable_url|browser_native_sd_url|dash_manifest|playback_video_dash_xml|<BaseURL)"/g;
-        let broaderMatch;
-        while ((broaderMatch = broaderRegex.exec(text)) !== null) {
-          const id = broaderMatch[1];
-          if (!urlsMap.has(id)) {
-            const section = text.substring(broaderMatch.index, Math.min(text.length, broaderMatch.index + 4000));
-            const streams = extractStreamsFromText(section);
-            if (streams) {
-              urlsMap.set(id, streams);
+      // 1. Structured JSON extraction by video ID
+      const subMap = Extractor.extractUrlsFromScriptText(raw);
+      if (subMap && typeof subMap.forEach === "function") {
+        subMap.forEach((streamInfo, videoId) => {
+          if (videoId && isNumericFacebookId(videoId)) {
+            if (!urlsMap.has(videoId) || (streamInfo.audioUrl && !urlsMap.get(videoId).audioUrl)) {
+              urlsMap.set(videoId, streamInfo);
+            }
+            if (streamInfo.audioUrl) {
+              lastDiscoveredStreamWithAudio = streamInfo;
             }
           }
-        }
+        });
+      }
 
-        // Global / page-level manifest fallback
-        const globalStreams = extractStreamsFromText(text);
-        if (globalStreams) {
-          if (!urlsMap.has("fallback_any")) {
-            urlsMap.set("fallback_any", globalStreams);
+      // 2. Direct DASH manifest / representations extraction from raw text
+      if (raw.includes("dash_manifest") || raw.includes("playback_video_dash_xml") || raw.includes("<MPD") || raw.includes("representations")) {
+        const directStreams = typeof Extractor.extractStreamsFromText === "function" ? Extractor.extractStreamsFromText(raw) : null;
+        if (directStreams && (directStreams.hdUrl || directStreams.sdUrl)) {
+          if (directStreams.audioUrl) {
+            lastDiscoveredStreamWithAudio = directStreams;
           }
-          // If on a Reel page, associate with the current URL Reel ID
-          const reelMatch = window.location.pathname.match(/\/reel(?:s)?\/(\d+)/);
-          if (reelMatch && !urlsMap.has(reelMatch[1])) {
-            urlsMap.set(reelMatch[1], globalStreams);
-          }
-          const videoMatch = window.location.pathname.match(/\/videos\/(\d+)/);
-          if (videoMatch && !urlsMap.has(videoMatch[1])) {
-            urlsMap.set(videoMatch[1], globalStreams);
+          const idMatch = raw.match(/"(?:video_id|videoId|id)":\s*"?(\d{6,30})"?/);
+          if (idMatch && isNumericFacebookId(idMatch[1])) {
+            const vidId = idMatch[1];
+            if (!urlsMap.has(vidId) || (directStreams.audioUrl && !urlsMap.get(vidId).audioUrl)) {
+              urlsMap.set(vidId, directStreams);
+            }
           }
         }
       }
     }
-
     return urlsMap;
   }
 
   /**
-   * Determine if the element is inside a Facebook Reel container or URL
+   * Helper to find live page stream information from all available page sources
    */
-  function isReelContext(element) {
-    if (window.location.pathname.includes("/reel/") || window.location.pathname.includes("/reels/")) {
-      return true;
+  function findLivePageStreams(authoritativeVideoId) {
+    const scriptUrls = extractUrlsFromScripts();
+    let streamMatch = null;
+
+    if (authoritativeVideoId && isNumericFacebookId(authoritativeVideoId) && scriptUrls.has(authoritativeVideoId)) {
+      streamMatch = scriptUrls.get(authoritativeVideoId);
     }
-    const reelContainer = element.closest('[aria-label*="Reel"], [data-pagelet*="Reel"], a[href*="/reel/"]');
-    return !!reelContainer;
+
+    if (!streamMatch) {
+      const urlId = extractVideoId(window.location.href, null);
+      if (urlId && scriptUrls.has(urlId)) {
+        streamMatch = scriptUrls.get(urlId);
+      }
+    }
+
+    if (!streamMatch && Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)) {
+      // Find stream that has audioUrl
+      for (const st of scriptUrls.values()) {
+        if (st && st.audioUrl) {
+          streamMatch = st;
+          break;
+        }
+      }
+      if (!streamMatch && scriptUrls.size > 0) {
+        streamMatch = scriptUrls.values().next().value;
+      }
+      if (!streamMatch && lastDiscoveredStreamWithAudio) {
+        streamMatch = lastDiscoveredStreamWithAudio;
+      }
+    }
+
+    return streamMatch;
   }
 
   /**
-   * Extract video ID from link, container, or pathname
+   * Determine if element is in a Reel context
    */
-  function extractVideoId(postLink, element) {
-    if (postLink) {
-      const reelMatch = postLink.match(/\/reel(?:s)?\/(\d+)/);
-      if (reelMatch) return reelMatch[1];
-      const videoMatch = postLink.match(/\/videos\/(\d+)/) || postLink.match(/[?&]v=(\d+)/);
+  function isReelContext(element) {
+    if (window.location.pathname.includes("/reel/") || window.location.pathname.includes("/reels/") || window.location.pathname.includes("/share/r/")) {
+      return true;
+    }
+    const container = element.closest(
+      '[data-pagelet*="Reel"], [aria-label*="Reel" i], [role="dialog"], [data-pagelet*="FeedUnit"]'
+    );
+    if (!container) return false;
+
+    if (container.getAttribute("data-pagelet")?.includes("Reel")) return true;
+    if (container.querySelector('a[href*="/reel/"], a[href*="/reels/"], a[href*="/share/r/"]')) return true;
+
+    return false;
+  }
+
+  /**
+   * Extract authoritative Facebook video or reel ID from URL or DOM element.
+   * Leverages FbExtractor.extractCanonicalVideoId to ensure strict canonical numeric ID filtering.
+   */
+  function extractVideoId(url, element) {
+    if (typeof FbExtractor !== "undefined" && typeof FbExtractor.extractCanonicalVideoId === "function") {
+      return FbExtractor.extractCanonicalVideoId(url, element, window.location.pathname);
+    }
+    // Fallback if FbExtractor not in scope
+    if (url) {
+      const numReel = url.match(/\/(?:reel|reels)\/(\d{6,30})/i);
+      if (numReel) return numReel[1];
+      const watchMatch = url.match(/[?&]v=(\d{6,30})/);
+      if (watchMatch) return watchMatch[1];
+      const videoMatch = url.match(/\/videos\/(?:[^/]+\/)?(\d{6,30})/);
       if (videoMatch) return videoMatch[1];
     }
     if (element) {
-      const postContainer = element.closest('[data-video-id], [data-store*="video_id"]');
+      const rawReelId = element.getAttribute("data-reel-id");
+      if (rawReelId && /^\d{6,30}$/.test(rawReelId.trim())) return rawReelId.trim();
+      const rawVideoId = element.getAttribute("data-video-id");
+      if (rawVideoId && /^\d{6,30}$/.test(rawVideoId.trim())) return rawVideoId.trim();
+      const postContainer = element.closest('[data-video-id], [data-reel-id], [data-store*="video_id"]');
       if (postContainer) {
-        const directId = postContainer.getAttribute("data-video-id");
-        if (directId) return directId;
+        const directId = postContainer.getAttribute("data-video-id") || postContainer.getAttribute("data-reel-id");
+        if (directId && /^\d{6,30}$/.test(directId.trim())) return directId.trim();
         const dataStore = postContainer.getAttribute("data-store");
-        const match = dataStore?.match(/"video_id":\s*"?(\d+)"?/);
+        const match = dataStore?.match(/"(?:video_id|reel_id)":\s*"?(\d{6,30})"?/);
         if (match) return match[1];
       }
     }
-    const pathReel = window.location.pathname.match(/\/reel(?:s)?\/(\d+)/);
-    if (pathReel) return pathReel[1];
-    const pathVideo = window.location.pathname.match(/\/videos\/(\d+)/);
-    if (pathVideo) return pathVideo[1];
-
     return null;
   }
 
@@ -354,10 +283,10 @@
     let title = document.title || "Facebook Video";
 
     if (postContainer) {
-      const linkElem = postContainer.querySelector('a[href*="/videos/"], a[href*="/reel/"], a[href*="/watch/"], a[href*="watch?v="]');
+      const linkElem = postContainer.querySelector('a[href*="/videos/"], a[href*="/reel/"], a[href*="/reels/"], a[href*="/share/r/"], a[href*="/watch/"], a[href*="watch?v="]');
       if (linkElem) {
         postLink = linkElem.href;
-      } else if (/\/(reel|videos|watch)\//.test(window.location.pathname) && /^https?:\/\/[^/]*facebook\.com/.test(window.location.href)) {
+      } else if (/\/(reel|reels|videos|watch)\//.test(window.location.pathname) && /^https?:\/\/[^/]*facebook\.com/.test(window.location.href)) {
         postLink = window.location.href.split("?")[0];
       }
       const textElem = postContainer.querySelector('[data-ad-preview="message"], [dir="auto"]');
@@ -368,17 +297,30 @@
 
     const isReel = isReelContext(video);
     const videoType = isReel ? "reel" : "video";
-    const videoId = extractVideoId(postLink, video) || video.id || `vid_${Math.random().toString(36).substr(2, 9)}`;
+    const videoId = extractVideoId(postLink, video);
+
+    // Only write data-reel-id if we have an authoritative Facebook identifier
+    if (videoId) {
+      video.setAttribute("data-reel-id", videoId);
+    }
+
+    // Use a persistent instance ID strictly for DOM tracking in detectedVideos map
+    let instanceId = video.getAttribute("data-binlate-instance-id");
+    if (!instanceId) {
+      instanceId = video.id || `vid_${Math.random().toString(36).substr(2, 9)}`;
+      video.setAttribute("data-binlate-instance-id", instanceId);
+    }
 
     return {
       element: video,
+      instanceId: instanceId,
+      id: instanceId,
       videoId: videoId,
       url: src,
       isBlob: !src || src.startsWith("blob:"),
       postLink: postLink || window.location.href,
       type: videoType,
-      title: title,
-      id: videoId
+      title: title
     };
   }
 
@@ -434,6 +376,11 @@
       </button>
     `;
 
+    const getFreshVideoInfo = () => {
+      const currentInstanceId = video.getAttribute("data-binlate-instance-id");
+      return detectedVideos.get(currentInstanceId) || videoInfo;
+    };
+
     mainBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       e.preventDefault();
@@ -451,15 +398,20 @@
         dropdown.classList.remove("binlate-active");
 
         const actionType = item.getAttribute("data-quality");
+        const freshInfo = getFreshVideoInfo();
 
         if (actionType === "COPY") {
-          const targetUrl = videoInfo.url || videoInfo.postLink || window.location.href;
-          await navigator.clipboard.writeText(targetUrl);
-          showToast("Đã sao chép liên kết vào clipboard!");
+          const targetUrl = freshInfo.url || freshInfo.postLink || window.location.href;
+          try {
+            await navigator.clipboard.writeText(targetUrl);
+            showToast("Đã sao chép liên kết vào clipboard!");
+          } catch (_) {
+            showToast("Không thể sao chép liên kết.");
+          }
           return;
         }
 
-        triggerDownload(videoInfo, actionType);
+        triggerDownload(freshInfo, actionType);
       });
     });
 
@@ -472,30 +424,44 @@
    * Request background script to start downloading
    */
   function triggerDownload(videoInfo, quality = "HD") {
-    showToast(`Đang chuẩn bị tải ${videoInfo.type.toUpperCase()} (${quality})...`);
-
     let downloadUrl = null;
+    let audioUrl = null;
+    let isDashSeparate = false;
     const scriptUrls = extractUrlsFromScripts();
 
-    // Match exact videoId to its streams
-    if (videoInfo.videoId && scriptUrls.has(videoInfo.videoId)) {
-      const match = scriptUrls.get(videoInfo.videoId);
-      if (quality === "HD" && match.hdUrl) {
-        downloadUrl = match.hdUrl;
-      } else if (match.sdUrl) {
-        downloadUrl = match.sdUrl;
-      } else if (match.hdUrl) {
-        downloadUrl = match.hdUrl;
+    // Dynamically re-evaluate authoritative Facebook numeric videoId from live DOM at download time (prevents stale closure)
+    const liveDomId = videoInfo.element ? extractVideoId(videoInfo.postLink, videoInfo.element) : null;
+    const storedNumericId = videoInfo.videoId && /^\d{6,30}$/.test(videoInfo.videoId) ? videoInfo.videoId : null;
+    const authoritativeVideoId = liveDomId || storedNumericId;
+
+    if (authoritativeVideoId) {
+      videoInfo.videoId = authoritativeVideoId;
+      if (videoInfo.element) {
+        videoInfo.element.setAttribute("data-reel-id", authoritativeVideoId);
       }
-    } else if (scriptUrls.has("fallback_any")) {
-      const match = scriptUrls.get("fallback_any");
-      if (quality === "HD" && match.hdUrl) {
-        downloadUrl = match.hdUrl;
-      } else if (match.sdUrl) {
-        downloadUrl = match.sdUrl;
-      } else if (match.hdUrl) {
-        downloadUrl = match.hdUrl;
+    }
+
+    let streamMatch = findLivePageStreams(authoritativeVideoId);
+
+    let isProgressive = false;
+    let isDash = false;
+    let progressiveHdUrl = null;
+    let progressiveSdUrl = null;
+
+    if (streamMatch) {
+      if (quality === "HD" && streamMatch.hdUrl) {
+        downloadUrl = streamMatch.hdUrl;
+      } else if (streamMatch.sdUrl) {
+        downloadUrl = streamMatch.sdUrl;
+      } else if (streamMatch.hdUrl) {
+        downloadUrl = streamMatch.hdUrl;
       }
+      audioUrl = streamMatch.audioUrl || null;
+      isDashSeparate = Boolean(streamMatch.isDashSeparate || (streamMatch.audioUrl && downloadUrl && streamMatch.audioUrl !== downloadUrl));
+      isProgressive = Boolean(streamMatch.isProgressive);
+      isDash = Boolean(streamMatch.isDash);
+      progressiveHdUrl = streamMatch.progressiveHdUrl || null;
+      progressiveSdUrl = streamMatch.progressiveSdUrl || null;
     }
 
     const looksLikeMediaUrl = (candidate) => {
@@ -508,7 +474,7 @@
       }
     };
 
-    // Direct stream URL on element
+    // Direct stream URL on element if available
     if (!downloadUrl && looksLikeMediaUrl(videoInfo.url)) {
       downloadUrl = videoInfo.url;
     }
@@ -521,13 +487,25 @@
       }
     }
 
-    chrome.runtime.sendMessage(
+    showToast(`⏳ Đang tải ${videoInfo.type === "reel" ? "Reel" : "Video"} (${quality})...`);
+
+    safeSendMessage(
       {
         action: "DOWNLOAD_FILE",
         payload: {
           url: downloadUrl,
-          postUrl: videoInfo.postLink || window.location.href,
-          videoId: videoInfo.videoId,
+          audioUrl: audioUrl,
+          isDashSeparate: isDashSeparate,
+          isDash: isDash,
+          isProgressive: isProgressive,
+          progressiveHdUrl: progressiveHdUrl,
+          progressiveSdUrl: progressiveSdUrl,
+          postUrl: (videoInfo.postLink && !/facebook\.com\/(?:reels?|watch)?\/?$/i.test(videoInfo.postLink))
+            ? videoInfo.postLink
+            : (authoritativeVideoId
+                ? `https://www.facebook.com/reel/${authoritativeVideoId}`
+                : (/facebook\.com/i.test(window.location.href) && !/facebook\.com\/(?:reels?|watch)?\/?$/i.test(window.location.href) ? window.location.href : null)),
+          videoId: authoritativeVideoId,
           selectedSource:
             videoInfo.url && !videoInfo.url.startsWith("blob:")
               ? videoInfo.url
@@ -538,14 +516,11 @@
         }
       },
       (res) => {
-        if (chrome.runtime.lastError) {
-          showToast(`⚠️ Lỗi kết nối tiện ích: ${chrome.runtime.lastError.message}`);
-          return;
-        }
-        if (res && res.success) {
-          showToast(`✅ Đang tải xuống: ${videoInfo.title.substring(0, 25)}...`);
+        if (!res) return;
+        if (res.success) {
+          showToast(`✅ Đã bắt đầu tải xuống (${quality})`);
         } else {
-          const errMsg = res?.error || "Không tìm thấy luồng video. Hãy phát video vài giây rồi thử lại.";
+          const errMsg = res.error || "Không tìm thấy luồng video. Hãy phát video vài giây rồi thử lại.";
           showToast(`⚠️ ${errMsg}`);
         }
       }
@@ -568,6 +543,14 @@
   }
 
   function scanPageVideos() {
+    if (!isExtensionValid()) {
+      if (domObserver) {
+        domObserver.disconnect();
+        domObserver = null;
+      }
+      return;
+    }
+
     const videoElements = document.querySelectorAll("video");
     const scriptData = extractUrlsFromScripts();
     const liveIds = new Set();
@@ -577,15 +560,32 @@
       liveIds.add(info.id);
       let matchedHd = null;
       let matchedSd = null;
+      let matchedAudio = null;
+      let matchedDashSeparate = false;
+      let matchedIsDash = false;
+      let matchedIsProgressive = false;
+      let matchedProgHd = null;
+      let matchedProgSd = null;
 
+      let entry = null;
       if (info.videoId && scriptData.has(info.videoId)) {
-        const entry = scriptData.get(info.videoId);
+        entry = scriptData.get(info.videoId);
+      } else if (
+        scriptData.size === 1 &&
+        Extractor.isDedicatedSingleVideoPage(window.location.pathname, window.location.search)
+      ) {
+        entry = scriptData.values().next().value;
+      }
+
+      if (entry) {
         matchedHd = entry.hdUrl;
         matchedSd = entry.sdUrl;
-      } else if (scriptData.has("fallback_any")) {
-        const entry = scriptData.get("fallback_any");
-        matchedHd = entry.hdUrl;
-        matchedSd = entry.sdUrl;
+        matchedAudio = entry.audioUrl || null;
+        matchedDashSeparate = Boolean(entry.isDashSeparate);
+        matchedIsDash = Boolean(entry.isDash);
+        matchedIsProgressive = Boolean(entry.isProgressive);
+        matchedProgHd = entry.progressiveHdUrl || null;
+        matchedProgSd = entry.progressiveSdUrl || null;
       }
 
       detectedVideos.set(info.id, {
@@ -597,6 +597,12 @@
         elementSrc: info.url && !info.url.startsWith("blob:") ? info.url : null,
         hdUrl: matchedHd,
         sdUrl: matchedSd,
+        audioUrl: matchedAudio,
+        isDashSeparate: matchedDashSeparate,
+        isDash: matchedIsDash,
+        isProgressive: matchedIsProgressive,
+        progressiveHdUrl: matchedProgHd,
+        progressiveSdUrl: matchedProgSd,
         isBlob: info.isBlob,
         postLink: info.postLink
       });
@@ -608,7 +614,7 @@
     }
 
     const list = Array.from(detectedVideos.values());
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       action: "REGISTER_VIDEOS",
       videos: list
     });
@@ -620,31 +626,48 @@
     }
   });
 
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === "SCAN_NOW") {
-      scanPageVideos();
-      sendResponse({ count: detectedVideos.size, videos: Array.from(detectedVideos.values()) });
-    } else if (request.action === "TRIGGER_CURRENT_VIDEO_DOWNLOAD") {
-      const firstVideo = document.querySelector("video");
-      if (firstVideo) {
-        const info = parseVideoElement(firstVideo);
-        triggerDownload(info, "HD");
-        sendResponse({ status: "triggered" });
-      } else {
-        showToast("Không tìm thấy video nào trên trang này.");
-        sendResponse({ status: "no_video" });
-      }
-    }
-  });
+  if (isExtensionValid()) {
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+      if (request.action === "SCAN_NOW") {
+        scanPageVideos();
+        sendResponse({ count: detectedVideos.size, videos: Array.from(detectedVideos.values()) });
+      } else if (request.action === "TRIGGER_CURRENT_VIDEO_DOWNLOAD") {
+        const firstVideo = document.querySelector("video");
+        if (firstVideo) {
+          const info = parseVideoElement(firstVideo);
+          triggerDownload(info, "HD");
+          sendResponse({ status: "triggered" });
+        } else {
+          showToast("Không tìm thấy video nào trên trang này.");
+          sendResponse({ status: "no_video" });
+        }
+      } else if (request.action === "GET_LIVE_PAGE_STREAMS") {
+        const suppliedId = isNumericFacebookId(request.videoId) ? request.videoId.trim() : null;
+        const urlId = !suppliedId && request.pageUrl ? extractVideoId(request.pageUrl, null) : null;
+        const domId = !suppliedId && !urlId ? extractVideoId(null, document.querySelector("video")) : null;
+        const targetId = suppliedId || urlId || domId || null;
 
-  const observer = new MutationObserver(() => {
+        const liveStreams = findLivePageStreams(targetId);
+        sendResponse({ success: true, streams: liveStreams });
+      }
+    });
+  }
+
+  domObserver = new MutationObserver(() => {
+    if (!isExtensionValid()) {
+      if (domObserver) {
+        domObserver.disconnect();
+        domObserver = null;
+      }
+      return;
+    }
     if (scanDebounceTimer) clearTimeout(scanDebounceTimer);
     scanDebounceTimer = setTimeout(() => {
       scanPageVideos();
     }, 400);
   });
 
-  observer.observe(document.body, {
+  domObserver.observe(document.body, {
     childList: true,
     subtree: true
   });
@@ -655,6 +678,6 @@
     scanPageVideos();
   }
 
-  console.log("[Bin.Late FB Downloader] Content script running & monitoring videos/reels.");
+  const _extVersion = (typeof chrome !== "undefined" && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : "?";
+  console.log(`[Download Video FB] v${_extVersion} content script loaded`);
 })();
-
